@@ -1,10 +1,10 @@
-import {topics,accounts,skillsFor,generate,fresh,grade,shuffle,cash,pick} from './engine.js?v=4';
-import {lessons} from './lessons.js?v=4';
+import {topics,accounts,skillsFor,generate,fresh,grade,shuffle,cash,pick} from './engine.js?v=5';
+import {lessons} from './lessons.js?v=5';
 const KEY='ledger-lab-v2', $=s=>document.querySelector(s), esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const emptyTopic=()=>({answered:0,correct:0,skills:{},lessons:[],mastered:false});
 const defaults=()=>({voice:true,questions:0,correct:0,streak:0,best:0,mistakesMastered:0,topics:Object.fromEntries(topics.map(t=>[t.id,emptyTopic()]))});
 let state;try{state={...defaults(),...JSON.parse(localStorage.getItem(KEY)||'{}')};for(const t of topics)state.topics[t.id]={...emptyTopic(),...state.topics[t.id]}}catch{state=defaults()}
-let storageFailed=false, screen={name:'home'}, session=null, lesson=null, hintTimer,rapidTimer,toastTimer, speechToken=0,dragAccount=null, installPrompt, hintAbort=null, speechAbort=null, coachCtx=null, coachSource=null;
+let storageFailed=false, screen={name:'home'}, session=null, lesson=null, hintTimer,rapidTimer,toastTimer, speechToken=0,dragAccount=null, installPrompt, hintAbort=null, speechAbort=null, coachCtx=null, coachSource=null, coachSpeaking=false, coachEndResolve=null;
 const app=$('#app');
 function save(){try{localStorage.setItem(KEY,JSON.stringify(state))}catch{storageFailed=true;toast('Your browser could not save progress. Keep this tab open.')}}
 const topic=id=>topics.find(t=>t.id===id), stat=id=>state.topics[id], pct=(a,b)=>b?Math.round(a/b*100):0;
@@ -32,8 +32,17 @@ async function playCoachBytes(bytes,token=speechToken){
   if(!coachCtx)throw new Error('audio_context_unavailable');
   const audio=await coachCtx.decodeAudioData(bytes.slice(0));
   if(token!==speechToken)return;
-  coachSource=coachCtx.createBufferSource();coachSource.buffer=audio;coachSource.connect(coachCtx.destination);
-  coachSource.onended=()=>{if(token===speechToken)coachSource=null};coachSource.start();
+  await new Promise(resolve=>{
+    coachSpeaking=true;coachEndResolve=resolve;
+    coachSource=coachCtx.createBufferSource();coachSource.buffer=audio;coachSource.connect(coachCtx.destination);
+    coachSource.onended=()=>{
+      if(token===speechToken)coachSource=null;
+      coachSpeaking=false;
+      const done=coachEndResolve;coachEndResolve=null;
+      if(done)done();
+    };
+    coachSource.start();
+  });
 }
 async function playCoachBase64(base64){
   if(!state.voice||document.hidden||!base64)return;
@@ -45,6 +54,8 @@ function stopSpeech(){
   speechToken++;
   if(speechAbort){speechAbort.abort();speechAbort=null}
   if(coachSource){try{coachSource.stop()}catch{}coachSource=null}
+  coachSpeaking=false;
+  if(coachEndResolve){const done=coachEndResolve;coachEndResolve=null;done()}
   if('speechSynthesis' in window)speechSynthesis.cancel();
 }
 async function speak(text){
@@ -59,7 +70,7 @@ async function speak(text){
     if(err?.name!=='AbortError'&&token===speechToken)toast('OpenAI voice is unavailable right now. Text coaching still works.');
   }
 }
-function cleanup(){clearInterval(hintTimer);clearInterval(rapidTimer);if(hintAbort){hintAbort.abort();hintAbort=null}stopSpeech()}
+function cleanup(){clearTimeout(hintTimer);clearInterval(rapidTimer);if(hintAbort){hintAbort.abort();hintAbort=null}stopSpeech()}
 function celebrate(){if(matchMedia('(prefers-reduced-motion: reduce)').matches)return;const box=document.createElement('div');box.className='confetti';box.innerHTML=Array.from({length:40},()=>`<i style="left:${Math.random()*100}%;--color:${pick(['#c4ec75','#a998ff','#61dbe8','#ffbc78'])};animation-delay:${Math.random()*.3}s"></i>`).join('');document.body.append(box);setTimeout(()=>box.remove(),2200)}
 function navigate(name,id){cleanup();screen={name,id};session=null;lesson=null;history.replaceState(null,'',name==='home'?'#home':`#${name}${id?'/'+id:''}`);render();window.scrollTo({top:0,behavior:'instant'})}
 function nav(){if(['quiz','lesson'].includes(screen.name))return '';const active=screen.name==='progress'?'progress':screen.name==='mixed'||session?.mode==='mixed'?'mixed':'home';return `<nav class="nav" aria-label="Main navigation">${[['home','⌂','Home'],['mixed','✦','Mixed Test'],['progress','▥','Progress']].map(([id,icon,label])=>`<button data-action="nav" data-id="${id}" class="${active===id?'active':''}" ${active===id?'aria-current="page"':''}><span class="nav-icon" aria-hidden="true">${icon}</span>${label}</button>`).join('')}</nav>`}
@@ -108,8 +119,25 @@ function lessonAnswer(i){if(lesson.answered)return;stopSpeech();const c=lessons[
 function lessonNext(){if(!lesson.answered)return;if(lesson.index+1===lessons[screen.id].length){const id=screen.id;celebrate();if(session?.review){returnToSession();toast('Lesson complete. Your question is ready.')}else{navigate('topic',id);toast('All four lesson cards completed. Ready for practice?')}}else startLesson(screen.id,lesson.index+1)}
 function bindSwipe(){let x,y;const el=$('#lesson-card');el?.addEventListener('touchstart',e=>{x=e.changedTouches[0].clientX;y=e.changedTouches[0].clientY},{passive:true});el?.addEventListener('touchend',e=>{const dx=e.changedTouches[0].clientX-x,dy=e.changedTouches[0].clientY-y;if(Math.abs(dx)<70||Math.abs(dy)>60)return;if(dx<0)lessonNext();else if(lesson.index)startLesson(screen.id,lesson.index-1)},{passive:true})}
 function startSession(id,mode='practice',count=10,skill=null){cleanup();screen={name:'quiz',id};session={id,mode,total:count,baseIndex:0,bonus:0,attempted:0,correct:0,coreCorrect:0,queue:[],reinforced:new Set(),skill,order:mode==='mixed'?shuffle(Array.from({length:count},(_,i)=>topics[i%7].id)):[],rows:[],answers:{},selected:null,step:0,missed:new Map()};nextQuestion()}
-function nextQuestion(){cleanup();if(!session)return;if(!session.queue.length&&session.baseIndex>=session.total){finish();return}const queued=session.queue.shift();const id=queued?.topic||(session.mode==='mixed'?session.order[session.baseIndex]:session.id);session.bonusQuestion=!!queued;if(queued)session.bonus++;else session.baseIndex++;session.current=queued||generate(id,level(id),session.skill);session.attempts=0;session.locked=false;session.feedback='';session.success=false;session.hintCount=0;session.assisted=false;session.step=0;session.numeric='';session.answers={};session.effect='';session.rows=[{account:'',side:'Debit',amount:''},{account:'',side:'Credit',amount:''}];session.selected=null;session.drop=[];session.started=performance.now();session.hintLastAt=performance.now();session.hintBusy=false;session.lastAnswer=null;screen.name='quiz';render();window.scrollTo({top:0,behavior:'instant'});startHints();if(session.mode==='rapid')startRapidClock()}
-function startHints(){clearInterval(hintTimer);if(session.mode==='rapid')return;const id=session.current.id;hintTimer=setInterval(()=>{if(!session||session.current.id!==id||session.locked){clearInterval(hintTimer);return}if(document.hidden||session.hintBusy)return;if(session.hintCount>=8){clearInterval(hintTimer);return}if(performance.now()-session.hintLastAt>=10000){session.hintLastAt=performance.now();hint(false)}},350)}
+function nextQuestion(){cleanup();if(!session)return;if(!session.queue.length&&session.baseIndex>=session.total){finish();return}const queued=session.queue.shift();const id=queued?.topic||(session.mode==='mixed'?session.order[session.baseIndex]:session.id);session.bonusQuestion=!!queued;if(queued)session.bonus++;else session.baseIndex++;session.current=queued||generate(id,level(id),session.skill);session.attempts=0;session.locked=false;session.feedback='';session.success=false;session.hintCount=0;session.assisted=false;session.step=0;session.numeric='';session.answers={};session.effect='';session.rows=[{account:'',side:'Debit',amount:''},{account:'',side:'Credit',amount:''}];session.selected=null;session.drop=[];session.started=performance.now();session.hintBusy=false;session.lastAnswer=null;session.autoHints=0;session.questionToken=(session.questionToken||0)+1;screen.name='quiz';render();window.scrollTo({top:0,behavior:'instant'});scheduleNextAutoHint();if(session.mode==='rapid')startRapidClock()}
+const AUTO_HINT_DELAYS=[18000,26000,36000];
+function cancelAutoHint(){clearTimeout(hintTimer);hintTimer=null}
+function scheduleNextAutoHint(delay){
+  cancelAutoHint();
+  if(!session||session.locked||session.mode==='rapid'||session.autoHints>=AUTO_HINT_DELAYS.length)return;
+  const token=session.questionToken,currentId=session.current.id;
+  const wait=delay??AUTO_HINT_DELAYS[session.autoHints];
+  hintTimer=setTimeout(async()=>{
+    if(!session||session.locked||session.current.id!==currentId||session.questionToken!==token)return;
+    if(document.hidden||session.hintBusy||coachSpeaking){scheduleNextAutoHint(5000);return}
+    session.autoHints++;
+    await hint(false,'auto');
+  },wait);
+}
+function markQuestionActivity(){
+  if(!session||session.locked||session.mode==='rapid')return;
+  scheduleNextAutoHint(18000);
+}
 function formula(q){if(!q.formula)return '';return `<div class="formula"><div class="eyebrow">YOUR EQUATION GUIDE</div><div>${esc(q.formula)}</div>${q.values?`<div class="values">${q.labels.map((l,i)=>`<div class="value ${q.missing===i?'missing':''}"><small>${esc(l)}</small><strong>${q.missing===i?'?':cash(q.values[i])}</strong></div>`).join('')}</div>`:''}</div>`}
 function choiceControls(q){return `<div class="choices ${session.mode==='rapid'?'rapid-choices':''}">${q.options.map((o,i)=>`<button class="choice ${session.success&&String(o)===String(q.answer)?'correct':''}" data-action="answer-choice" data-index="${i}" ${session.locked?'disabled':''}>${session.mode==='rapid'?'':`<span class="letter">${String.fromCharCode(65+i)}</span>`}<span>${esc(o)}</span></button>`).join('')}</div>`}
 function journalControls(q){if(q.type==='drag')return `<p class="part-label">Drag an account to a side, or select it and tap “Place selected”.</p><div class="chips">${q.accountOptions.map(a=>`<button draggable="true" class="chip ${session.selected===a?'selected':''}" data-account="${esc(a)}" data-action="select-chip" ${session.locked?'disabled':''}>${esc(a)}</button>`).join('')}</div><div class="drop-grid">${['Debit','Credit'].map(side=>`<section class="dropzone" data-side="${side}"><h3>${side}</h3>${button('＋ Place selected','drop','drop-button',`data-side="${side}" ${session.locked?'disabled':''}`)}${session.drop.filter(e=>e.side===side).map(e=>`<div class="drop-item">${button('×','remove-drop','',`data-account="${esc(e.account)}" aria-label="Remove ${esc(e.account)}" ${session.locked?'disabled':''}`)}${esc(e.account)}<input aria-label="${esc(e.account)} ${side} amount" data-drop-account="${esc(e.account)}" inputmode="decimal" type="text" placeholder="Amount" value="${esc(e.amount)}" ${session.locked?'disabled':''}></div>`).join('')}</section>`).join('')}</div>${totals(session.drop)}`;
@@ -119,7 +147,7 @@ const parseAmount=s=>{const str=String(s).replace(/[$,\s]/g,'').replace(/−/g,'
 function quizPage(){const q=session.current,t=topic(q.topic);let controls='';if(q.type==='choice')controls=choiceControls(q);else if(q.type==='transaction')controls=`<p class="part-label">1. Choose each affected account and its direction.</p><div class="account-choices">${q.accountOptions.map(a=>`<label class="account-choice"><span>${esc(a)}</span><select aria-label="${esc(a)} change" data-move="${esc(a)}" ${session.locked?'disabled':''}>${[['','No change'],['increase','Increase ↑'],['decrease','Decrease ↓']].map(([v,l])=>`<option value="${v}" ${session.answers[a]===v?'selected':''}>${l}</option>`).join('')}</select></label>`).join('')}</div><p class="part-label">2. Choose the overall accounting-equation effect.</p><select class="select-full" id="effect" aria-label="Overall accounting equation effect" ${session.locked?'disabled':''}><option value="">Select the effect</option>${q.effectOptions.map(o=>`<option ${session.effect===o?'selected':''}>${esc(o)}</option>`).join('')}</select>`;
  else if(q.type==='journal'||q.type==='drag')controls=journalControls(q);
  else controls=`${q.type==='guided'&&q.guided?`<div class="guided-steps">${q.steps.map((s,i)=>`<span class="step ${i===session.step?'active':i<session.step?'done':''}">${i<session.step?'✓':i+1}. ${s.label}</span>`).join('')}</div><div class="formula">${esc(q.steps[session.step].formula)}</div>`:''}<label class="answer-label" for="answer">${q.type==='guided'&&q.guided?q.steps[session.step].label:'Your answer'} · use a minus sign for a loss</label><input id="answer" class="number-input" type="text" inputmode="decimal" autocomplete="off" value="${esc(session.numeric||'')}" placeholder="Enter amount" aria-label="Your answer" ${session.locked?'disabled':''}>`;
- layout(`<div class="practice-wrap"><div class="session-top">${button('×','back','back',`aria-label="End session" ${session.id?`data-id="${session.id}"`:''}`)}${bar(session.baseIndex/session.total*100,t.color)}<small>${session.baseIndex} / ${session.total}${session.bonus?` + ${session.bonus} bonus`:''}</small></div><section class="quiz" style="--color:${t.color}"><div class="question-meta"><span class="eyebrow">${t.name} · ${session.mode==='rapid'?'RAPID FIRE':session.mode.toUpperCase()}</span><span class="tag ${session.bonusQuestion?'bonus':''}">${session.bonusQuestion?'↻ Targeted bonus':`LEVEL ${level(t.id)}`}</span></div>${session.mode==='rapid'?'<div class="timer"><span id="timebar" style="width:100%"></span></div><p id="seconds" class="muted" style="text-align:center">10 seconds</p>':''}<h2 class="${session.mode==='rapid'?'rapid-prompt':''}">${esc(q.prompt)}</h2>${formula(q)}${controls}<div id="feedback-area">${feedbackHtml()}</div><div class="actions">${button('♫ Verbal hint','hint','text-button',session.locked?'disabled':'')}${button('Review topic','review','text-button')}${session.locked?button('Continue →','next'):q.type!=='choice'?button(q.type==='guided'&&q.guided&&session.step<q.steps.length-1?'Check step →':'Check answer','submit'):''}</div>${session.mode!=='rapid'?`<p class="coach-line"><i></i> ${state.voice?'Live AI coach':'Text coach'} · question-aware hints about every 10 seconds · AI-generated voice.</p>`:''}</section></div>`);bindDrag()}
+ layout(`<div class="practice-wrap"><div class="session-top">${button('×','back','back',`aria-label="End session" ${session.id?`data-id="${session.id}"`:''}`)}${bar(session.baseIndex/session.total*100,t.color)}<small>${session.baseIndex} / ${session.total}${session.bonus?` + ${session.bonus} bonus`:''}</small></div><section class="quiz" style="--color:${t.color}"><div class="question-meta"><span class="eyebrow">${t.name} · ${session.mode==='rapid'?'RAPID FIRE':session.mode.toUpperCase()}</span><span class="tag ${session.bonusQuestion?'bonus':''}">${session.bonusQuestion?'↻ Targeted bonus':`LEVEL ${level(t.id)}`}</span></div>${session.mode==='rapid'?'<div class="timer"><span id="timebar" style="width:100%"></span></div><p id="seconds" class="muted" style="text-align:center">10 seconds</p>':''}<h2 class="${session.mode==='rapid'?'rapid-prompt':''}">${esc(q.prompt)}</h2>${formula(q)}${controls}<div id="feedback-area">${feedbackHtml()}</div><div class="actions">${button(session.hintBusy||coachSpeaking?'Coach speaking…':'♫ Verbal hint','hint','text-button',(session.locked||session.hintBusy||coachSpeaking)?'disabled':'')}${button('Review topic','review','text-button')}${session.locked?button('Continue →','next'):q.type!=='choice'?button(q.type==='guided'&&q.guided&&session.step<q.steps.length-1?'Check step →':'Check answer','submit'):''}</div>${session.mode!=='rapid'?`<p class="coach-line"><i></i> ${state.voice?'Live AI coach':'Text coach'} · one hint at a time · first nudge after 18 seconds · AI-generated voice.</p>`:''}</section></div>`);bindDrag()}
 function feedbackHtml(){if(!session.feedback)return '';return `<div class="feedback ${session.success?'good':''}" role="status"><h3>${session.success?session.attempts?'You worked through it.':'Nice work.':session.locked?'Time’s up. Let’s learn it.':session.attempts?'Try that again.':'A small nudge'}</h3><p>${esc(session.feedback)}</p>${(session.attempts>=2||session.locked)&&session.current.visual?visual(session.current.visual,session.current):''}</div>`}
 function refreshFeedback(){const area=$('#feedback-area');if(area)area.innerHTML=feedbackHtml()}
 function localHint(q,level){if(level<=2)return q.hint;if(level<=5)return q.strong||q.hint;return q.why||q.strong||q.hint}
@@ -139,10 +167,11 @@ function questionSnapshot(q){
   };
   return cleanForCoach(snap);
 }
-async function hint(manual=true){
-  if(!session||session.locked||session.hintBusy||session.hintCount>=8)return;
-  session.assisted=true;session.hintCount=Math.min(8,session.hintCount+1);session.hintLastAt=performance.now();session.hintBusy=true;
-  const q=session.current,questionId=q.id,levelNow=session.hintCount;
+async function hint(manual=true,source='manual'){
+  if(!session||session.locked||session.hintBusy||coachSpeaking||session.hintCount>=8)return;
+  cancelAutoHint();
+  session.assisted=true;session.hintCount=Math.min(8,session.hintCount+1);session.hintBusy=true;
+  const q=session.current,questionId=q.id,token=session.questionToken,levelNow=session.hintCount;
   if(manual&&!state.voice){state.voice=true;save();const v=$('.voice');if(v){v.textContent='♫ Voice on';v.classList.add('on');v.setAttribute('aria-pressed','true');v.setAttribute('aria-label','Turn voice off')}}
   session.feedback='Ledger Coach is reading this exact question… Hint '+levelNow+'/8';refreshFeedback();
   if(hintAbort)hintAbort.abort();hintAbort=new AbortController();
@@ -152,25 +181,36 @@ async function hint(manual=true){
     if(!response.ok)throw new Error('coach '+response.status);
     const data=await response.json();text=String(data.hint||'').trim();audio=String(data.audio||'');if(!text)throw new Error('empty hint');
   }catch(err){
-    if(err?.name==='AbortError')return;
+    if(err?.name==='AbortError'){session.hintBusy=false;return}
     text=localHint(q,levelNow);
-  }finally{if(session&&session.current?.id===questionId)session.hintBusy=false}
-  if(!session||session.current?.id!==questionId||session.locked)return;
+  }
+  if(!session||session.current?.id!==questionId||session.questionToken!==token||session.locked){session.hintBusy=false;return}
   session.feedback=text;refreshFeedback();
-  if(audio&&state.voice)playCoachBase64(audio);else if(state.voice)speak(text);
+  try{
+    if(audio&&state.voice)await playCoachBase64(audio);
+    else if(state.voice)await speak(text);
+  }finally{
+    if(session&&session.current?.id===questionId&&session.questionToken===token){
+      session.hintBusy=false;
+      if(!session.locked)scheduleNextAutoHint(source==='miss'?26000:undefined);
+    }
+  }
 }
 function enqueue(q){const key=q.id;if(session.reinforced.has(key))return;session.reinforced.add(key);const a=fresh(q.topic,level(q.topic),q.skill,q.prompt),b=fresh(q.topic,level(q.topic),q.skill,a.prompt);session.queue.unshift(a,b)}
 function record(q,ok){const s=stat(q.topic),sk=skillState(q.topic,q.skill);state.questions++;s.answered++;sk.answered++;session.attempted++;if(ok){state.correct++;s.correct++;sk.correct++;session.correct++;if(!session.bonusQuestion)session.coreCorrect++;state.streak++;state.best=Math.max(state.best,state.streak);if(!session.assisted){sk.clean++;if(sk.open&&sk.clean>=2){sk.open=false;state.mistakesMastered++;toast('Skill mastered: '+q.label)}}else sk.clean=0}else{state.streak=0;sk.clean=0;sk.misses++;sk.open=true;session.missed.set(q.topic+':'+q.skill,{topic:q.topic,skill:q.skill,label:q.label});enqueue(q)}const m=mastery(q.topic);if(m>=85&&!s.mastered){s.mastered=true;celebrate();toast('Topic Mastered: '+topic(q.topic).name)}save()}
 function check(answer){if(!session||session.locked)return;const q=session.current;session.lastAnswer=cleanForCoach(answer);stopSpeech();if(q.type==='guided'&&q.guided){const good=Number(answer)===q.steps[session.step].answer&&Number.isFinite(Number(answer));if(good&&session.step<q.steps.length-1){session.step++;session.numeric='';session.feedback='Step complete. Carry that value into the next equation.';render();speak('Correct step. '+q.steps[session.step].label);return}if(!good){miss();return}}
- const ok=q.type==='guided'&&q.guided?true:grade(q,answer);if(!ok){miss();return}if(session.attempts===0)record(q,true);session.success=true;session.locked=true;session.feedback=q.why+(session.attempts?' Two new questions on this same skill come next.':'');clearInterval(hintTimer);clearInterval(rapidTimer);render();speak('Correct. '+q.why)}
+ const ok=q.type==='guided'&&q.guided?true:grade(q,answer);if(!ok){miss();return}if(session.attempts===0)record(q,true);session.success=true;session.locked=true;session.feedback=q.why+(session.attempts?' Two new questions on this same skill come next.':'');cancelAutoHint();clearInterval(rapidTimer);render();speak('Correct. '+q.why)}
 function miss(){
+  cancelAutoHint();stopSpeech();
   if(session.attempts===0)record(session.current,false);
   session.attempts++;session.assisted=true;session.success=false;
-  session.feedback=session.attempts===1?'Not quite. I’m checking the exact choice you made…':'Let’s make this specific to the numbers and accounts in front of you.';
+  session.feedback=session.attempts===1?'Not quite. I’m checking the exact choice you made…':'Let’s use the exact numbers and accounts on this question.';
   refreshFeedback();
   if(session.mode==='rapid'){session.locked=true;clearInterval(rapidTimer);session.feedback=session.current.why;render();speak('Not quite. '+session.current.why);return}
-  session.hintCount=Math.max(session.hintCount,Math.min(7,session.attempts*2-1));
-  session.hintBusy=false;hint(false);
+  if(session.attempts===1&&session.hintCount<1)session.hintCount=1;
+  else if(session.attempts>=2&&session.hintCount<3)session.hintCount=3;
+  session.hintBusy=false;
+  hint(false,'miss');
 }
 function submit(){if(session.locked)return;const q=session.current;if(q.type==='transaction'){if(!session.effect||!Object.values(session.answers).some(Boolean)){toast('Choose the account changes and overall effect.');return}check({moves:session.answers,effect:session.effect})}else if(q.type==='journal'||q.type==='drag'){const rows=(q.type==='drag'?session.drop:session.rows).filter(r=>r.account||r.amount);if(!rows.length||rows.some(r=>!r.account||!Number.isFinite(parseAmount(r.amount))||parseAmount(r.amount)<=0)){toast('Choose each account and enter a positive amount.');return}check(rows.map(r=>({...r,amount:parseAmount(r.amount)})))}else{const n=parseAmount($('#answer').value);if(!Number.isFinite(n)){toast('Enter a number first. Use a minus sign for a loss.');return}check(n)}}
 function finish(){cleanup();screen.name='result';render();if(session.coreCorrect/session.total>=.8)celebrate()}
@@ -178,23 +218,23 @@ function resultPage(){const score=pct(session.coreCorrect,session.total);layout(
 function startRapidClock(){let elapsed=0,last=performance.now();rapidTimer=setInterval(()=>{if(!session||session.locked)return;const now=performance.now();if(!document.hidden)elapsed+=now-last;last=now;const left=Math.max(0,10000-elapsed);if($('#timebar'))$('#timebar').style.width=left/100+'%';if($('#seconds'))$('#seconds').textContent=Math.ceil(left/1000)+' seconds';if(!left){clearInterval(rapidTimer);if(!session.attempts)record(session.current,false);session.attempts++;session.locked=true;session.feedback=session.current.why;render();speak('Time’s up. '+session.current.why)}},100)}
 function bindDrag(){document.querySelectorAll('[draggable]').forEach(el=>el.addEventListener('dragstart',e=>{if(session.locked){e.preventDefault();return}dragAccount=el.dataset.account;e.dataTransfer.setData('text/plain',dragAccount);e.dataTransfer.effectAllowed='move'}));document.querySelectorAll('.dropzone').forEach(el=>{el.addEventListener('dragover',e=>e.preventDefault());el.addEventListener('drop',e=>{e.preventDefault();placeAccount(e.dataTransfer.getData('text/plain'),el.dataset.side)})})}
 function placeAccount(account,side){if(session.locked)return;if(!account){toast('Select an account first.');return}if(!session.current.accountOptions.includes(account))return;session.drop=session.drop.filter(e=>e.account!==account);session.drop.push({account,side,amount:''});session.selected=null;render()}
-function returnToSession(){cleanup();screen=session.review.screen;lesson=session.review.lesson;delete session.review;render();if(!session.locked){startHints();if(session.mode==='rapid')startRapidClock()}}
+function returnToSession(){cleanup();screen=session.review.screen;lesson=session.review.lesson;delete session.review;render();if(!session.locked){scheduleNextAutoHint(18000);if(session.mode==='rapid')startRapidClock()}}
 app.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b||b.disabled)return;const a=b.dataset.action,id=b.dataset.id;
  if(a==='nav')navigate(id);else if(a==='topic')navigate('topic',id);else if(a==='back')navigate(id?'topic':'home',id);
  else if(a==='voice'){state.voice=!state.voice;save();stopSpeech();b.textContent=state.voice?'♫ Voice on':'♫ Voice off';b.classList.toggle('on',state.voice);b.setAttribute('aria-pressed',state.voice);b.setAttribute('aria-label',state.voice?'Turn voice off':'Turn voice on');if(screen.name==='lesson'&&state.voice)narrate()}
  else if(a==='learn')startLesson(id);else if(a==='narrate')narrate();else if(a==='lesson-answer')lessonAnswer(Number(b.dataset.index));else if(a==='lesson-next')lessonNext();else if(a==='lesson-prev'&&lesson.index)startLesson(screen.id,lesson.index-1);
  else if(a==='practice'||a==='challenge')startSession(id,a);else if(a==='mistakes')navigate('mistakes',id);else if(a==='skill')startSession(id,'mistakes',6,b.dataset.skill);
  else if(a==='start-mixed')startSession(null,'mixed',Number(b.dataset.count));else if(a==='rapid')startSession('debits','rapid');
- else if(a==='answer-choice')check(session.current.options[Number(b.dataset.index)]);else if(a==='submit')submit();else if(a==='hint')hint();else if(a==='next')nextQuestion();else if(a==='review'){const current=topic(session.current.topic);cleanup();session.review={screen:{...screen},lesson};screen={name:'lesson',id:current.id};lesson={index:0,answered:false,feedback:''};render();toast('Use × to return to your question.');narrate()}
+ else if(a==='answer-choice'){markQuestionActivity();check(session.current.options[Number(b.dataset.index)])}else if(a==='submit'){markQuestionActivity();submit()}else if(a==='hint')hint(true,'manual');else if(a==='next')nextQuestion();else if(a==='review'){const current=topic(session.current.topic);cleanup();session.review={screen:{...screen},lesson};screen={name:'lesson',id:current.id};lesson={index:0,answered:false,feedback:''};render();toast('Use × to return to your question.');narrate()}
  else if(a==='return-session')returnToSession();
  else if(a==='add-row'&&!session.locked){if(session.rows.length<6){session.rows.push({account:'',side:'Debit',amount:''});render()}}else if(a==='remove-row'&&!session.locked){if(session.rows.length>1){session.rows.splice(Number(b.dataset.index),1);render()}}
  else if(a==='select-chip'&&!session.locked){session.selected=b.dataset.account;render()}else if(a==='drop')placeAccount(session.selected,b.dataset.side);else if(a==='remove-drop'&&!session.locked){session.drop=session.drop.filter(r=>r.account!==b.dataset.account);render()}
  else if(a==='again')startSession(session.id,session.mode,session.total,session.skill);else if(a==='install'&&installPrompt){installPrompt.prompt();installPrompt=null}
 });
-app.addEventListener('change',e=>{const el=e.target;if(!session||session.locked)return;if(el.dataset.move)session.answers[el.dataset.move]=el.value;if(el.id==='effect')session.effect=el.value;if(el.dataset.row!==undefined){session.rows[Number(el.dataset.row)][el.dataset.field]=el.value;const totalsEl=$('#totals');if(totalsEl)totalsEl.outerHTML=totals(session.rows)}});
-app.addEventListener('input',e=>{const el=e.target;if(!session||session.locked)return;if(el.id==='answer')session.numeric=el.value;if(el.dataset.row!==undefined){session.rows[Number(el.dataset.row)][el.dataset.field]=el.value;$('#totals').outerHTML=totals(session.rows)}if(el.dataset.dropAccount){session.drop.find(r=>r.account===el.dataset.dropAccount).amount=el.value;$('#totals').outerHTML=totals(session.drop)}});
+app.addEventListener('change',e=>{const el=e.target;if(!session||session.locked)return;markQuestionActivity();if(el.dataset.move)session.answers[el.dataset.move]=el.value;if(el.id==='effect')session.effect=el.value;if(el.dataset.row!==undefined){session.rows[Number(el.dataset.row)][el.dataset.field]=el.value;const totalsEl=$('#totals');if(totalsEl)totalsEl.outerHTML=totals(session.rows)}});
+app.addEventListener('input',e=>{const el=e.target;if(!session||session.locked)return;markQuestionActivity();if(el.id==='answer')session.numeric=el.value;if(el.dataset.row!==undefined){session.rows[Number(el.dataset.row)][el.dataset.field]=el.value;$('#totals').outerHTML=totals(session.rows)}if(el.dataset.dropAccount){session.drop.find(r=>r.account===el.dataset.dropAccount).amount=el.value;$('#totals').outerHTML=totals(session.drop)}});
 app.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.id==='answer'){e.preventDefault();submit()}});
-document.addEventListener('visibilitychange',()=>{if(document.hidden)stopSpeech()});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){cancelAutoHint();stopSpeech()}else if(session&&!session.locked&&screen.name==='quiz'&&session.mode!=='rapid'){scheduleNextAutoHint(18000)}});
 window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e});
 window.addEventListener('hashchange',()=>{const [name,id]=location.hash.slice(1).split('/');if(['home','mixed','progress'].includes(name))navigate(name);else if(name==='topic'&&topic(id))navigate(name,id)});
 if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).then(reg=>{const announce=()=>{if(!reg.waiting)return;const banner=$('#update');banner.hidden=false;banner.innerHTML='A new version is ready. Finish your question, then refresh. <button id="apply-update">Update now</button>';$('#apply-update').onclick=()=>{reg.waiting.postMessage({type:'SKIP_WAITING'});navigator.serviceWorker.addEventListener('controllerchange',()=>location.reload(),{once:true})}};announce();reg.addEventListener('updatefound',()=>{const worker=reg.installing;worker?.addEventListener('statechange',()=>{if(worker.state==='installed'&&navigator.serviceWorker.controller)announce()})});reg.update().catch(()=>{})}).catch(()=>{})}
