@@ -1,5 +1,5 @@
-const CACHE='ledger-lab-v5-stable-coach';
-const FILES=['./','./index.html','./styles.css?v=5','./app.js?v=5','./engine.js?v=5','./lessons.js?v=5','./manifest.webmanifest','./icons/icon-192.png','./icons/icon-512.png'];
+const CACHE='ledger-lab-v6-teacher-mode';
+const FILES=['./','./index.html','./styles.css?v=6','./app.js?v=6','./engine.js?v=6','./lessons.js?v=6','./manifest.webmanifest','./icons/icon-192.png','./icons/icon-512.png'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(FILES))));
 self.addEventListener('message',event=>{if(event.data?.type==='SKIP_WAITING')self.skipWaiting()});
 self.addEventListener('activate',event=>event.waitUntil((async()=>{for(const key of await caches.keys())if(key.startsWith('ledger-lab-')&&key!==CACHE)await caches.delete(key);await self.clients.claim()})()));
