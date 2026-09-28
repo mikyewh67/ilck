@@ -1,5 +1,5 @@
-const CACHE='ledger-lab-v3-openai-coach';
-const FILES=['./','./index.html','./styles.css?v=3','./app.js?v=3','./engine.js?v=3','./lessons.js?v=3','./manifest.webmanifest','./icons/icon-192.png','./icons/icon-512.png'];
+const CACHE='ledger-lab-v4-native-audio-coach';
+const FILES=['./','./index.html','./styles.css?v=4','./app.js?v=4','./engine.js?v=4','./lessons.js?v=4','./manifest.webmanifest','./icons/icon-192.png','./icons/icon-512.png'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(FILES))));
 self.addEventListener('message',event=>{if(event.data?.type==='SKIP_WAITING')self.skipWaiting()});
 self.addEventListener('activate',event=>event.waitUntil((async()=>{for(const key of await caches.keys())if(key.startsWith('ledger-lab-')&&key!==CACHE)await caches.delete(key);await self.clients.claim()})()));
