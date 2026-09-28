@@ -119,7 +119,7 @@ function lessonAnswer(i){if(lesson.answered)return;stopSpeech();const c=lessons[
 function lessonNext(){if(!lesson.answered)return;if(lesson.index+1===lessons[screen.id].length){const id=screen.id;celebrate();if(session?.review){returnToSession();toast('Lesson complete. Your question is ready.')}else{navigate('topic',id);toast('All four lesson cards completed. Ready for practice?')}}else startLesson(screen.id,lesson.index+1)}
 function bindSwipe(){let x,y;const el=$('#lesson-card');el?.addEventListener('touchstart',e=>{x=e.changedTouches[0].clientX;y=e.changedTouches[0].clientY},{passive:true});el?.addEventListener('touchend',e=>{const dx=e.changedTouches[0].clientX-x,dy=e.changedTouches[0].clientY-y;if(Math.abs(dx)<70||Math.abs(dy)>60)return;if(dx<0)lessonNext();else if(lesson.index)startLesson(screen.id,lesson.index-1)},{passive:true})}
 function startSession(id,mode='practice',count=10,skill=null){cleanup();screen={name:'quiz',id};session={id,mode,total:count,baseIndex:0,bonus:0,attempted:0,correct:0,coreCorrect:0,queue:[],reinforced:new Set(),skill,order:mode==='mixed'?shuffle(Array.from({length:count},(_,i)=>topics[i%7].id)):[],rows:[],answers:{},selected:null,step:0,missed:new Map()};nextQuestion()}
-function nextQuestion(){cleanup();if(!session)return;if(!session.queue.length&&session.baseIndex>=session.total){finish();return}const queued=session.queue.shift();const id=queued?.topic||(session.mode==='mixed'?session.order[session.baseIndex]:session.id);session.bonusQuestion=!!queued;if(queued)session.bonus++;else session.baseIndex++;session.current=queued||generate(id,level(id),session.skill);session.attempts=0;session.locked=false;session.feedback='';session.success=false;session.hintCount=0;session.assisted=false;session.step=0;session.numeric='';session.answers={};session.effect='';session.rows=[{account:'',side:'Debit',amount:''},{account:'',side:'Credit',amount:''}];session.selected=null;session.drop=[];session.started=performance.now();session.hintBusy=false;session.lastAnswer=null;session.autoHints=0;session.questionToken=(session.questionToken||0)+1;screen.name='quiz';render();window.scrollTo({top:0,behavior:'instant'});scheduleNextAutoHint();if(session.mode==='rapid')startRapidClock()}
+function nextQuestion(){cleanup();if(!session)return;if(!session.queue.length&&session.baseIndex>=session.total){finish();return}const queued=session.queue.shift();const id=queued?.topic||(session.mode==='mixed'?session.order[session.baseIndex]:session.id);session.bonusQuestion=!!queued;if(queued)session.bonus++;else session.baseIndex++;session.current=queued||generate(id,level(id),session.skill);session.attempts=0;session.locked=false;session.feedback='';session.success=false;session.hintCount=0;session.assisted=false;session.step=0;session.numeric='';session.answers={};session.effect='';session.rows=[{account:'',side:'Debit',amount:''},{account:'',side:'Credit',amount:''}];session.selected=null;session.drop=[];session.started=performance.now();session.hintBusy=false;session.lastAnswer=null;session.autoHints=0;session.hintSerial=0;session.questionToken=(session.questionToken||0)+1;screen.name='quiz';render();window.scrollTo({top:0,behavior:'instant'});scheduleNextAutoHint();if(session.mode==='rapid')startRapidClock()}
 const AUTO_HINT_DELAYS=[18000,26000,36000];
 function cancelAutoHint(){clearTimeout(hintTimer);hintTimer=null}
 function scheduleNextAutoHint(delay){
@@ -171,7 +171,7 @@ async function hint(manual=true,source='manual'){
   if(!session||session.locked||session.hintBusy||coachSpeaking||session.hintCount>=8)return;
   cancelAutoHint();
   session.assisted=true;session.hintCount=Math.min(8,session.hintCount+1);session.hintBusy=true;
-  const q=session.current,questionId=q.id,token=session.questionToken,levelNow=session.hintCount;
+  const q=session.current,questionId=q.id,token=session.questionToken,levelNow=session.hintCount,serial=++session.hintSerial;
   if(manual&&!state.voice){state.voice=true;save();const v=$('.voice');if(v){v.textContent='♫ Voice on';v.classList.add('on');v.setAttribute('aria-pressed','true');v.setAttribute('aria-label','Turn voice off')}}
   session.feedback='Ledger Coach is reading this exact question… Hint '+levelNow+'/8';refreshFeedback();
   if(hintAbort)hintAbort.abort();hintAbort=new AbortController();
@@ -181,16 +181,16 @@ async function hint(manual=true,source='manual'){
     if(!response.ok)throw new Error('coach '+response.status);
     const data=await response.json();text=String(data.hint||'').trim();audio=String(data.audio||'');if(!text)throw new Error('empty hint');
   }catch(err){
-    if(err?.name==='AbortError'){session.hintBusy=false;return}
+    if(err?.name==='AbortError'){if(session&&session.hintSerial===serial)session.hintBusy=false;return}
     text=localHint(q,levelNow);
   }
-  if(!session||session.current?.id!==questionId||session.questionToken!==token||session.locked){session.hintBusy=false;return}
+  if(!session||session.current?.id!==questionId||session.questionToken!==token||session.locked||session.hintSerial!==serial){return}
   session.feedback=text;refreshFeedback();
   try{
     if(audio&&state.voice)await playCoachBase64(audio);
     else if(state.voice)await speak(text);
   }finally{
-    if(session&&session.current?.id===questionId&&session.questionToken===token){
+    if(session&&session.current?.id===questionId&&session.questionToken===token&&session.hintSerial===serial){
       session.hintBusy=false;
       if(!session.locked)scheduleNextAutoHint(source==='miss'?26000:undefined);
     }
@@ -201,7 +201,7 @@ function record(q,ok){const s=stat(q.topic),sk=skillState(q.topic,q.skill);state
 function check(answer){if(!session||session.locked)return;const q=session.current;session.lastAnswer=cleanForCoach(answer);stopSpeech();if(q.type==='guided'&&q.guided){const good=Number(answer)===q.steps[session.step].answer&&Number.isFinite(Number(answer));if(good&&session.step<q.steps.length-1){session.step++;session.numeric='';session.feedback='Step complete. Carry that value into the next equation.';render();speak('Correct step. '+q.steps[session.step].label);return}if(!good){miss();return}}
  const ok=q.type==='guided'&&q.guided?true:grade(q,answer);if(!ok){miss();return}if(session.attempts===0)record(q,true);session.success=true;session.locked=true;session.feedback=q.why+(session.attempts?' Two new questions on this same skill come next.':'');cancelAutoHint();clearInterval(rapidTimer);render();speak('Correct. '+q.why)}
 function miss(){
-  cancelAutoHint();stopSpeech();
+  cancelAutoHint();if(hintAbort){hintAbort.abort();hintAbort=null}stopSpeech();
   if(session.attempts===0)record(session.current,false);
   session.attempts++;session.assisted=true;session.success=false;
   session.feedback=session.attempts===1?'Not quite. I’m checking the exact choice you made…':'Let’s use the exact numbers and accounts on this question.';
