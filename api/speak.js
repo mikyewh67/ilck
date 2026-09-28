@@ -13,9 +13,9 @@ export default async function handler(req,res){
     model:process.env.OPENAI_TTS_MODEL||'gpt-4o-mini-tts',
     voice:process.env.OPENAI_TTS_VOICE||'marin',
     input:text,
-    instructions:'Sound like a real young adult tutor sitting next to one student. Natural conversational rhythm, warm but not overly cheerful, varied intonation, relaxed pacing, subtle emphasis on accounting terms, short natural pauses, no announcer voice, no customer-service cadence, and absolutely no robotic narration.',
+    instructions:'Sound like a real young adult tutor sitting next to one student. Natural conversational rhythm, warm but not overly cheerful, varied intonation, relaxed medium-slow pacing, subtle emphasis on accounting terms, short natural pauses between ideas, no announcer voice, no customer-service cadence, and absolutely no robotic narration.',
     response_format:'wav',
-    speed:1.02
+    speed:0.95
    })
   });
   if(!response.ok){
