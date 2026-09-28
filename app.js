@@ -119,7 +119,7 @@ function lessonAnswer(i){if(lesson.answered)return;stopSpeech();const c=lessons[
 function lessonNext(){if(!lesson.answered)return;if(lesson.index+1===lessons[screen.id].length){const id=screen.id;celebrate();if(session?.review){returnToSession();toast('Lesson complete. Your question is ready.')}else{navigate('topic',id);toast('All four lesson cards completed. Ready for practice?')}}else startLesson(screen.id,lesson.index+1)}
 function bindSwipe(){let x,y;const el=$('#lesson-card');el?.addEventListener('touchstart',e=>{x=e.changedTouches[0].clientX;y=e.changedTouches[0].clientY},{passive:true});el?.addEventListener('touchend',e=>{const dx=e.changedTouches[0].clientX-x,dy=e.changedTouches[0].clientY-y;if(Math.abs(dx)<70||Math.abs(dy)>60)return;if(dx<0)lessonNext();else if(lesson.index)startLesson(screen.id,lesson.index-1)},{passive:true})}
 function startSession(id,mode='practice',count=10,skill=null){cleanup();screen={name:'quiz',id};session={id,mode,total:count,baseIndex:0,bonus:0,attempted:0,correct:0,coreCorrect:0,queue:[],reinforced:new Set(),skill,order:mode==='mixed'?shuffle(Array.from({length:count},(_,i)=>topics[i%7].id)):[],rows:[],answers:{},selected:null,step:0,missed:new Map()};nextQuestion()}
-function nextQuestion(){cleanup();if(!session)return;if(!session.queue.length&&session.baseIndex>=session.total){finish();return}const queued=session.queue.shift();const id=queued?.topic||(session.mode==='mixed'?session.order[session.baseIndex]:session.id);session.bonusQuestion=!!queued;if(queued)session.bonus++;else session.baseIndex++;session.current=queued||generate(id,level(id),session.skill);session.attempts=0;session.locked=false;session.feedback='';session.success=false;session.hintCount=0;session.assisted=false;session.step=0;session.numeric='';session.answers={};session.effect='';session.rows=[{account:'',side:'Debit',amount:''},{account:'',side:'Credit',amount:''}];session.selected=null;session.drop=[];session.started=performance.now();session.hintBusy=false;session.lastAnswer=null;session.autoHints=0;session.hintSerial=0;session.questionToken=(session.questionToken||0)+1;screen.name='quiz';render();window.scrollTo({top:0,behavior:'instant'});scheduleNextAutoHint();if(session.mode==='rapid')startRapidClock()}
+function nextQuestion(){cleanup();if(!session)return;if(!session.queue.length&&session.baseIndex>=session.total){finish();return}const queued=session.queue.shift();const id=queued?.topic||(session.mode==='mixed'?session.order[session.baseIndex]:session.id);session.bonusQuestion=!!queued;if(queued)session.bonus++;else session.baseIndex++;session.current=queued||generate(id,level(id),session.skill);session.attempts=0;session.locked=false;session.feedback='';session.success=false;session.hintCount=0;session.assisted=false;session.step=0;session.numeric='';session.answers={};session.effect='';session.rows=[{account:'',side:'Debit',amount:''},{account:'',side:'Credit',amount:''}];session.selected=null;session.drop=[];session.started=performance.now();session.hintBusy=false;session.lastAnswer=null;session.autoHints=0;session.hintSerial=0;session.hintHistory=[];session.questionToken=(session.questionToken||0)+1;screen.name='quiz';render();window.scrollTo({top:0,behavior:'instant'});scheduleNextAutoHint();if(session.mode==='rapid')startRapidClock()}
 const AUTO_HINT_DELAYS=[18000,26000,36000];
 function cancelAutoHint(){clearTimeout(hintTimer);hintTimer=null}
 function scheduleNextAutoHint(delay){
@@ -163,7 +163,7 @@ function questionSnapshot(q){
     options:q.options||null,answer:q.answer??null,formula:q.formula||null,labels:q.labels||null,values:q.values||null,missing:q.missing??null,
     entries:q.entries||null,moves:q.moves||null,effect:q.effect||null,accountOptions:q.accountOptions||null,effectOptions:q.effectOptions||null,
     steps:q.steps||null,currentStep:q.type==='guided'&&q.steps?q.steps[session.step]||null:null,
-    knownExplanation:q.why||q.strong||null,lastStudentAnswer:session.lastAnswer??null,wrongAttempts:session.attempts
+    knownExplanation:q.why||q.strong||null,lastStudentAnswer:session.lastAnswer??null,wrongAttempts:session.attempts,previousHints:(session.hintHistory||[]).slice(-6)
   };
   return cleanForCoach(snap);
 }
@@ -185,7 +185,7 @@ async function hint(manual=true,source='manual'){
     text=localHint(q,levelNow);
   }
   if(!session||session.current?.id!==questionId||session.questionToken!==token||session.locked||session.hintSerial!==serial){return}
-  session.feedback=text;refreshFeedback();
+  session.feedback=text;if(!session.hintHistory.includes(text))session.hintHistory.push(text);refreshFeedback();
   try{
     if(audio&&state.voice)await playCoachBase64(audio);
     else if(state.voice)await speak(text);
