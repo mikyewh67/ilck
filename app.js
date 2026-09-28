@@ -1,474 +1,118 @@
-const TOPICS = [
-  {id:'basics',n:1,icon:'🧾',name:'Financial Statement Basics',desc:'Assets, liabilities, equity, revenue, expenses, and what each statement reports.'},
-  {id:'transactions',n:2,icon:'🔁',name:'Transaction Analysis',desc:'Read the transaction, identify the accounts, then see the accounting-equation effect.'},
-  {id:'operations',n:3,icon:'🧮',name:'Account Operations',desc:'Normal balances and roll-forwards for Cash, A/R, Supplies, A/P, and Unearned Revenue.'},
-  {id:'equations',n:4,icon:'➗',name:'Equation Manipulation',desc:'Solve for equity, income, expenses, beginning balances, and multi-step unknowns.'},
-  {id:'debits',n:5,icon:'↔️',name:'Debits & Credits',desc:'Know which side increases or decreases every account type — fast.'},
-  {id:'statements',n:6,icon:'📊',name:'Financial Statements',desc:'Build income statements, owner’s equity statements, and balance sheets.'},
-  {id:'journal',n:7,icon:'📓',name:'Recording Transactions',desc:'Turn business events into correct general journal entries.'}
-];
-
-const DEFAULT_STATE = {
-  questions:0, correct:0, streak:0, bestStreak:0, mistakesMastered:0,
-  voice:true,
-  topics:Object.fromEntries(TOPICS.map(t=>[t.id,{answered:0,correct:0,mastery:0,level:1,mistakes:{}}]))
-};
-
-let state = loadState();
-let view = {screen:'home',topicId:null,mode:null};
-let session = null;
-let hintTimer = null;
-let hintTick = 0;
-let selectedMulti = new Set();
-let journalSelections = {};
-let lessonIndex = 0;
-let lessonAnswered = false;
-
-function loadState(){
-  try{
-    const saved = JSON.parse(localStorage.getItem('ledgerLabState')||'null');
-    if(!saved) return structuredClone(DEFAULT_STATE);
-    const merged = {...structuredClone(DEFAULT_STATE),...saved};
-    TOPICS.forEach(t=> merged.topics[t.id] = {...DEFAULT_STATE.topics[t.id], ...(saved.topics?.[t.id]||{})});
-    return merged;
-  }catch{return structuredClone(DEFAULT_STATE)}
+import {topics,accounts,skillsFor,generate,fresh,grade,shuffle,cash,pick} from './engine.js?v=2';
+import {lessons} from './lessons.js?v=2';
+const KEY='ledger-lab-v2', $=s=>document.querySelector(s), esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const emptyTopic=()=>({answered:0,correct:0,skills:{},lessons:[],mastered:false});
+const defaults=()=>({voice:true,questions:0,correct:0,streak:0,best:0,mistakesMastered:0,topics:Object.fromEntries(topics.map(t=>[t.id,emptyTopic()]))});
+let state;try{state={...defaults(),...JSON.parse(localStorage.getItem(KEY)||'{}')};for(const t of topics)state.topics[t.id]={...emptyTopic(),...state.topics[t.id]}}catch{state=defaults()}
+let storageFailed=false, screen={name:'home'}, session=null, lesson=null, hintTimer,rapidTimer,toastTimer, speechToken=0,dragAccount=null, installPrompt;
+const app=$('#app');
+function save(){try{localStorage.setItem(KEY,JSON.stringify(state))}catch{storageFailed=true;toast('Your browser could not save progress. Keep this tab open.')}}
+const topic=id=>topics.find(t=>t.id===id), stat=id=>state.topics[id], pct=(a,b)=>b?Math.round(a/b*100):0;
+const overall=()=>pct(state.correct,state.questions);
+const level=id=>stat(id).answered>=20&&pct(stat(id).correct,stat(id).answered)>=80?3:stat(id).answered>=8&&pct(stat(id).correct,stat(id).answered)>=65?2:1;
+function mastery(id){const s=stat(id),coverage=Math.min(1,Object.keys(s.skills).length/Math.min(8,skillsFor(id,3).length));return Math.round(pct(s.correct,s.answered)*Math.min(1,s.answered/25)*(.6+.4*coverage))}
+const readiness=()=>Math.round(topics.reduce((n,t)=>n+mastery(t.id),0)/7);
+const mistakes=id=>Object.entries(stat(id).skills).filter(([,s])=>s.open);
+const skillState=(id,skill)=>stat(id).skills[skill]||(stat(id).skills[skill]={answered:0,correct:0,clean:0,misses:0,open:false});
+const weakest=()=>topics.flatMap(t=>Object.entries(stat(t.id).skills).map(([id,s])=>({topic:t.id,id,label:skillsFor(t.id,3).find(x=>x.id===id)?.label||id,...s}))).sort((a,b)=>Number(b.open)-Number(a.open)||pct(a.correct,a.answered)-pct(b.correct,b.answered));
+const nextTopic=()=>[...topics].sort((a,b)=>mastery(a.id)-mastery(b.id))[0];
+const button=(text,action,cls='primary',data='')=>`<button class="${cls}" data-action="${action}" ${data}>${text}</button>`;
+function toast(text){clearTimeout(toastTimer);$('#toast').textContent=text;$('#toast').classList.add('show');toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),4000)}
+function stopSpeech(){speechToken++;if('speechSynthesis' in window)speechSynthesis.cancel()}
+function speak(text){stopSpeech();if(!state.voice||!('speechSynthesis' in window)||document.hidden)return;const token=speechToken;const chunks=text.replace(/↑/g,' increases ').replace(/↓/g,' decreases ').replace(/\$/g,' dollars ').split(/(?<=[.!?])\s+/);function next(){if(token!==speechToken||!chunks.length)return;const u=new SpeechSynthesisUtterance(chunks.shift());u.lang='en-US';u.rate=.94;const voice=speechSynthesis.getVoices().find(v=>v.lang==='en-US'&&/Samantha|Aria|Google US|Microsoft Jenny/.test(v.name));if(voice)u.voice=voice;u.onend=next;u.onerror=()=>{};speechSynthesis.speak(u)}next()}
+function cleanup(){clearInterval(hintTimer);clearInterval(rapidTimer);stopSpeech()}
+function celebrate(){if(matchMedia('(prefers-reduced-motion: reduce)').matches)return;const box=document.createElement('div');box.className='confetti';box.innerHTML=Array.from({length:40},()=>`<i style="left:${Math.random()*100}%;--color:${pick(['#c4ec75','#a998ff','#61dbe8','#ffbc78'])};animation-delay:${Math.random()*.3}s"></i>`).join('');document.body.append(box);setTimeout(()=>box.remove(),2200)}
+function navigate(name,id){cleanup();screen={name,id};session=null;lesson=null;history.replaceState(null,'',name==='home'?'#home':`#${name}${id?'/'+id:''}`);render();window.scrollTo({top:0,behavior:'instant'})}
+function nav(){if(['quiz','lesson'].includes(screen.name))return '';const active=screen.name==='progress'?'progress':screen.name==='mixed'||session?.mode==='mixed'?'mixed':'home';return `<nav class="nav" aria-label="Main navigation">${[['home','⌂','Home'],['mixed','✦','Mixed Test'],['progress','▥','Progress']].map(([id,icon,label])=>`<button data-action="nav" data-id="${id}" class="${active===id?'active':''}" ${active===id?'aria-current="page"':''}><span class="nav-icon" aria-hidden="true">${icon}</span>${label}</button>`).join('')}</nav>`}
+function header(){return `<header class="header"><button class="brand" data-action="nav" data-id="home" aria-label="Ledger Lab home"><span class="brand-mark">L.</span><span><strong>ledger lab</strong><small>one small win at a time</small></span></button><div class="header-actions"><span class="course-pill">ACCOUNTING 1 · CH. 1–2</span><button class="voice ${state.voice?'on':''}" data-action="voice" aria-pressed="${state.voice}" aria-label="${state.voice?'Turn voice off':'Turn voice on'}">${state.voice?'♫ Voice on':'♫ Voice off'}</button></div></header>`}
+function layout(html){app.innerHTML=header()+`<main class="wrap screen">${html}</main>`+nav()+(storageFailed?'<p class="storage-warning">Progress cannot currently be saved in this browser.</p>':'')}
+const bar=(value,color)=>`<div class="bar" style="--color:${color||'var(--lime)'}"><span style="--value:${value}%"></span></div>`;
+function heading(title,sub,id){return `<div class="screen-heading">${button('←','back','back',`aria-label="Back" ${id?`data-id="${id}"`:''}`)}<div>${sub?`<p class="eyebrow">${sub}</p>`:''}<h1>${title}</h1></div></div>`}
+function render(){const map={home:home,topic:topicPage,mixed:mixedPage,progress:progressPage,mistakes:mistakesPage,lesson:lessonPage,quiz:quizPage,result:resultPage};(map[screen.name]||home)()}
+function home(){const next=nextTopic();layout(`<div class="greeting"><div><p class="eyebrow">YOUR NEXT SMALL WIN</p><h1>Let’s make it <span class="spark">click.</span></h1><p>Seven topics. A little practice. A lot more confidence.</p></div><span class="daily-streak">ϟ ${state.streak} in a row</span></div><div class="home-top"><section class="continue"><div><p class="eyebrow">PICK UP YOUR PATH · TOPIC ${next.no}</p><h2>${next.name}</h2><p>${next.desc}</p>${button('Continue learning &nbsp; ↗','topic','dark-button',`data-id="${next.id}"`)}</div><div class="orbit" aria-hidden="true"><span>${next.icon}</span><b>✦</b></div></section><section class="ready-card"><div class="ring" style="--value:${readiness()}"><span>${readiness()}%</span></div><div><h3>Test readiness</h3><p>A practice estimate across all seven topics, not a predicted grade.</p></div><div class="mini-stats"><div><strong>${overall()}%</strong><small>first-try accuracy</small></div><div><strong>${state.questions}</strong><small>answered</small></div><div><strong>${state.mistakesMastered}</strong><small>mistakes mastered</small></div></div></section></div><div class="home-bottom"><section class="path-panel"><div class="section-title"><h2>Your learning path</h2><small>01 → 07</small></div><div class="path">${topics.map(t=>`<button class="path-step ${t.id===next.id?'current':''}" style="--color:${t.color}" data-action="topic" data-id="${t.id}"><span class="bubble">${mastery(t.id)>=85?'✓':t.no}</span><span><b>${t.name}</b><small>${mastery(t.id)}% mastery</small></span></button>`).join('')}</div></section><section><div class="section-title"><h2>Choose your next move</h2><small>Explore any topic</small></div><div class="topic-grid">${topics.map(t=>`<button class="topic-card" style="--color:${t.color}" data-action="topic" data-id="${t.id}"><div class="topic-top"><span class="topic-icon">${t.icon}</span><span class="level">LEVEL ${level(t.id)}</span></div><h3>${t.name}</h3><p>${t.desc}</p><div class="topic-meta"><strong>${mastery(t.id)>=85?'✓ Topic Mastered':`${mastery(t.id)}% mastery`}</strong><span>${pct(stat(t.id).correct,stat(t.id).answered)}% accuracy</span></div>${bar(mastery(t.id),t.color)}</button>`).join('')}</div></section></div><p class="install-note">Your progress stays on this device. ${installPrompt?button('Install app','install','text-button'):'On iPhone: open in Safari → Share → Add to Home Screen.'}</p>`)}
+function topicPage(){const t=topic(screen.id),s=stat(t.id);layout(heading(t.name,`TOPIC ${t.no} / 07`)+`<div class="topic-banner" style="--color:${t.color}"><div class="topic-icon">${t.icon}</div><div style="flex:1"><h3>${mastery(t.id)>=85?'✓ Topic Mastered':`Level ${level(t.id)} · ${['Build the basics','Make connections','Apply it independently'][level(t.id)-1]}`}</h3><p>${mastery(t.id)}% mastery · ${pct(s.correct,s.answered)}% first-try accuracy · ${s.answered} answered</p>${bar(mastery(t.id),t.color)}</div></div><div class="modes" style="--color:${t.color}">${[['learn','▷','Learn','Four visual lessons. Listen, swipe, and check your understanding.'],['practice','∞','Practice','Fresh questions with hints and immediate skill reinforcement.'],['mistakes','↻','Mistakes',`${mistakes(t.id).length} skills to revisit. Turn the tricky parts into strengths.`],['challenge','ϟ','Challenge','Ten questions to put your understanding to work.']].map(([action,icon,name,desc])=>`<button class="mode" data-action="${action}" data-id="${t.id}"><span class="mode-symbol">${icon}</span><h3>${name}</h3><p>${desc}</p></button>`).join('')}</div>${t.id==='debits'?`<button class="wide-action" data-action="rapid"><span><strong>ϟ Rapid fire</strong><p>Debit or credit? Ten seconds per question. Ten rounds.</p></span><span>↗</span></button>`:''}<p class="install-note">Level 2 opens after 8 answers at 65% accuracy. Level 3 opens after 20 at 80%. Lessons are always available.</p>`)}
+function mixedPage(){layout(heading('Mix it up.','ALL SEVEN TOPICS')+`<section class="panel"><h2>Choose your session</h2><p class="muted" style="margin-top:10px">Every session covers all seven topics. Formulas stay visible. If you miss a skill, two targeted bonus questions follow after you finish its retry.</p><div class="test-picker">${[10,15,20,30].map(n=>`<button class="test-option" data-action="start-mixed" data-count="${n}"><strong>${n}</strong><small>core questions</small></button>`).join('')}</div><p class="install-note">No exam mode. No pressure to rush. Your score uses first attempts so retries do not inflate it.</p></section>`)}
+function progressPage(){const weak=weakest();layout(heading('See what’s clicking.','YOUR PROGRESS')+`<div class="stats-grid">${[['First-try accuracy',overall()+'%'],['Questions answered',state.questions],['Current streak',state.streak],['Best streak',state.best],['Mistakes mastered',state.mistakesMastered],['Test readiness',readiness()+'%'],['Topics mastered',topics.filter(t=>mastery(t.id)>=85).length+'/7'],['Lessons completed',topics.reduce((n,t)=>n+stat(t.id).lessons.length,0)+'/28']].map(([l,v])=>`<div class="stat"><small>${l}</small><strong>${v}</strong></div>`).join('')}</div><section class="panel"><h2>Topic by topic</h2>${topics.map(t=>`<div class="progress-row"><div><h3>${t.name}</h3><small>Level ${level(t.id)} · ${pct(stat(t.id).correct,stat(t.id).answered)}% accuracy · ${stat(t.id).answered} answered</small></div>${bar(mastery(t.id),t.color)}<strong>${mastery(t.id)}%</strong></div>`).join('')}</section><section class="panel"><h2>Your next best practice</h2><p class="muted" style="font-size:.875rem;margin-top:8px">Weak skills come first. A missed skill is mastered after two clean, unassisted answers in a row.</p>${weak.length?weak.slice(0,10).map(w=>`<div class="weak-row"><div><p>${esc(w.label)}</p><small>${topic(w.topic).name} · ${pct(w.correct,w.answered)}% accuracy · ${w.open?'needs practice':'building confidence'}</small></div>${button('Practice','skill','secondary',`data-id="${w.topic}" data-skill="${esc(w.id)}"`)}</div>`).join(''):'<div class="empty">Answer your first few questions to find your strengths and next steps.</div>'}</section><p class="install-note">Readiness combines accuracy, practice volume, and skill coverage equally across topics. It is an estimate, not a test-score prediction. Hints and assisted retries cannot clear a missed skill.</p>`)}
+function mistakesPage(){const t=topic(screen.id),ms=mistakes(t.id);layout(heading('Make your mistakes count.',t.name,t.id)+`<section class="panel"><h2>${ms.length?`${ms.length} skills ready for a comeback`:'A clean slate.'}</h2>${ms.length?ms.map(([id,s])=>`<div class="weak-row"><div><p>${esc(skillsFor(t.id,3).find(x=>x.id===id)?.label||id)}</p><small>${s.misses} misses · ${s.clean}/2 clean answers toward mastery</small></div>${button('Try again','skill','secondary',`data-id="${t.id}" data-skill="${esc(id)}"`)}</div>`).join(''):'<p class="empty">Missed skills will appear here. Practice to see what needs another look.</p>'}${button('Practice this topic','practice','primary',`data-id="${t.id}"`)}</section>`)}
+function visual(kind,q={}){
+ const boxes=(items,sign='→')=>`<div class="visual-grid">${items.map(([label,value],i)=>`${i?`<span class="visual-sign">${Array.isArray(sign)?sign[i-1]:sign}</span>`:''}<div class="visual-box"><small>${label}</small><b>${value}</b></div>`).join('')}</div>`;
+ let body='';
+ if(kind==='taccount')body=`<div class="taccount"><h3>${esc(q.account||'The two sides')}</h3><div class="t-sides"><div><b>DEBIT · LEFT</b><br>${q.normal?(q.normal==='Debit'?'Increase ↑':'Decrease ↓'):'Assets ↑<br>Expenses ↑<br>Withdrawals ↑'}</div><div><b>CREDIT · RIGHT</b><br>${q.normal?(q.normal==='Credit'?'Increase ↑':'Decrease ↓'):'Liabilities ↑<br>Capital ↑<br>Revenue ↑'}</div></div></div>`;
+ else if(kind==='accounts')body=`<table class="entry-table"><thead><tr><th>Account</th><th>Debit</th><th>Credit</th></tr></thead><tbody>${q.entries.map(e=>`<tr><td>${esc(e.account)}</td><td>${e.side==='Debit'?cash(e.amount):'—'}</td><td>${e.side==='Credit'?cash(e.amount):'—'}</td></tr>`).join('')}</tbody></table><p class="visual-note">${esc(q.effect||'Total debits = total credits')}</p>`;
+ else if(kind==='steps')body=boxes(q.steps.map(s=>[s.label,cash(s.answer)]));
+ else if(kind==='equation'&&q.values)body=boxes(q.labels.map((l,i)=>[esc(l),cash(q.values[i])]),'·');
+ else if(kind==='equation')body=`<div class="visual-box"><small>Start with the relationship</small><b>${esc(q.formula||'')}</b></div><p class="visual-note">${esc(q.why||'')}</p>`;
+ else if(kind==='classification')body=`<div class="visual-box"><small>Connect the description to its category</small><b>${esc(q.answer)}</b></div><p class="visual-note">${esc(q.why)}</p>`;
+ else if(kind==='balance')body=boxes([['Assets','$25,000'],['Liabilities','$8,000'],['Equity','$17,000']],['=','+'])+'<p class="visual-note">Assets = Liabilities + Equity</p>';
+ else if(kind==='receivable')body=boxes([['Do the work','Revenue ↑<br>Receivable ↑'],['Collect later','Cash ↑<br>Receivable ↓']])+'<p class="visual-note">One service. One amount earned. No second revenue.</p>';
+ else if(kind==='advance')body=boxes([['Before the work','Cash ↑<br>Unearned Revenue ↑'],['After the work','Unearned Revenue ↓<br>Revenue ↑']]);
+ else if(kind==='unpaid')body=boxes([['Cost incurred','Expense ↑'],['Still owed','Payable ↑'],['Not paid','Cash unchanged']]);
+ else if(kind==='movement'||kind==='supplies')body=boxes([['Purchase supplies','Supplies ↑'],['Pay cash','Cash ↓']])+'<p class="visual-note">Both are assets. Total assets stay the same.</p>';
+ else if(kind==='roll'||kind==='payable')body=boxes([['Beginning','Start'],['Increases','+ Add'],['Decreases','− Remove'],['Ending','= Remains']]);
+ else if(kind==='investment')body=boxes([['Ending equity','$16,000'],['Undo additions','− $10,000<br>− $5,000'],['Undo withdrawals','+ $1,000'],['Investment','$2,000']]);
+ else if(kind==='withdrawal')body=boxes([['Before withdrawals','Beginning + Investment + Income'],['What remains','− Ending equity'],['Difference','Withdrawals']]);
+ else if(kind==='bridge')body=boxes([['1. Beginning equity','Assets − Liabilities'],['2. Ending equity','Assets − Liabilities'],['3. Net income','End − Begin − Investment + Withdrawals']]);
+ else if(kind==='statements')body=boxes([['Over a period','Income statement'],['At one date','Balance sheet']]);
+ else if(kind==='account-types')body=boxes([['Salaries Expense','Expense → Debit'],['Salaries Payable','Liability → Credit']]);
+ else if(kind==='split')body=visual('accounts',{entries:[{account:'Equipment',side:'Debit',amount:8000},{account:'Cash',side:'Credit',amount:3000},{account:'Accounts Payable',side:'Credit',amount:5000}]}).replace(/^<div class="visual">|<\/div>$/g,'');
+ else if(kind==='multi')body=boxes([['Accounts Receivable','Debit $1,000'],['Consulting Revenue','Credit $600'],['Design Revenue','Credit $400']]);
+ else if(kind==='journal')body=boxes([['Cash increases','Debit $2,000'],['Capital increases','Credit $2,000']]);
+ else if(kind==='income')body=boxes([['Revenue','$12,000'],['Expenses','− $6,000'],['Net income','= $6,000']]);
+ else if(kind==='cashflow')body=boxes([['Inflows','$7,000'],['Outflows','− $1,000'],['Net change','= $6,000']]);
+ else body=boxes([['Beginning equity','Start'],['Investment + Income','+ Add'],['Withdrawals','− Subtract'],['Ending equity','Finish']]);
+ return `<div class="visual">${body}</div>`;
 }
-function saveState(){ localStorage.setItem('ledgerLabState',JSON.stringify(state)); }
-const $ = s=>document.querySelector(s);
-const app = document.getElementById('app');
-const rand=(a,b)=>Math.floor(Math.random()*(b-a+1))+a;
-const pick=a=>a[rand(0,a.length-1)];
-const shuffle=a=>[...a].sort(()=>Math.random()-.5);
-const money=n=>'$'+Number(n).toLocaleString();
-const num=n=>Number(n).toLocaleString();
-const esc=s=>String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
-
-function topic(id){return TOPICS.find(t=>t.id===id)}
-function topicStat(id){return state.topics[id]}
-function accuracy(s){return s.answered?Math.round((s.correct/s.answered)*100):0}
-function readiness(){
-  const acc = state.questions ? state.correct/state.questions : 0;
-  const mastery = TOPICS.reduce((sum,t)=>sum+topicStat(t.id).mastery,0)/(TOPICS.length*100);
-  return Math.round((acc*.7+mastery*.3)*100);
-}
-function overallAccuracy(){return state.questions?Math.round(state.correct/state.questions*100):0}
-function speak(text, force=false){
-  if(!('speechSynthesis' in window) || (!state.voice && !force)) return;
-  try{ speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(text.replace(/\$/g,' dollars ')); u.rate=.98; u.pitch=1.03; speechSynthesis.speak(u);}catch{}
-}
-function stopSpeech(){ if('speechSynthesis' in window) speechSynthesis.cancel(); }
-function startHintClock(){
-  clearInterval(hintTimer); hintTick=0;
-  if(!session?.current) return;
-  hintTimer=setInterval(()=>{
-    hintTick++;
-    if(hintTick===1) speak('Quick hint. '+session.current.hint1);
-    else if(hintTick===2) speak('Another hint. '+(session.current.hint2||session.current.hint1));
-    else if(hintTick%2===0) speak('Take it one step at a time. '+(session.current.hint2||session.current.hint1));
-  },10000);
-}
-function confetti(){
-  const wrap=document.createElement('div');wrap.className='confetti';
-  for(let i=0;i<70;i++){const p=document.createElement('i');p.style.left=Math.random()*100+'%';p.style.animationDelay=(Math.random()*.35)+'s';p.style.background=pick(['#7c5cff','#19d3a2','#f7c96b','#4da3ff','#ff6b7a']);wrap.appendChild(p)}
-  document.body.appendChild(wrap);setTimeout(()=>wrap.remove(),2100);
-}
-function toast(msg){
-  const d=document.createElement('div');d.textContent=msg;d.style.cssText='position:fixed;left:50%;bottom:92px;transform:translateX(-50%);background:#1a1e2a;border:1px solid #353b4d;color:#fff;padding:12px 16px;border-radius:14px;z-index:120;box-shadow:0 15px 40px rgba(0,0,0,.4);font-size:13px';
-  document.body.appendChild(d);setTimeout(()=>d.remove(),1800)
-}
-
-function topbar(){return `
-<div class="topbar">
-  <div class="brand" onclick="goHome()" role="button"><div class="logo">LL</div><div><h1>Ledger Lab</h1><p>Accounting 1 coach</p></div></div>
-  <div class="top-actions"><button class="icon-btn" onclick="toggleVoice()" title="Coach voice">${state.voice?'🔊':'🔇'}</button></div>
-</div>`}
-function bottomNav(active='home'){return `<div class="bottom-nav">
-<button class="${active==='home'?'active':''}" onclick="goHome()">⌂ Home</button>
-<button class="${active==='test'?'active':''}" onclick="showTestPicker()">✦ Mixed Test</button>
-<button class="${active==='stats'?'active':''}" onclick="showStats()">▥ Progress</button>
-</div>`}
-function toggleVoice(){state.voice=!state.voice;saveState();render();toast(state.voice?'Coach voice on':'Coach voice off')}
-function goHome(){clearInterval(hintTimer);stopSpeech();view={screen:'home',topicId:null,mode:null};session=null;render()}
-
-function render(){
-  if(view.screen==='home') renderHome();
-  else if(view.screen==='topic') renderTopic();
-  else if(view.screen==='lesson') renderLesson();
-  else if(view.screen==='quiz') renderQuiz();
-  else if(view.screen==='stats') renderStats();
-  else if(view.screen==='testPicker') renderTestPicker();
-  else if(view.screen==='testResult') renderTestResult();
-}
-
-function renderHome(){
-  const ready=readiness();
-  app.innerHTML=topbar()+`
-  <section class="hero">
-    <div class="card hero-card">
-      <div class="eyebrow">Your 7-topic Accounting 1 path</div>
-      <h2>Learn the pattern.<br>Then make it automatic.</h2>
-      <p>Short visual lessons, infinite mixed practice, equation guides, spoken coaching, adaptive repeats, and journal-entry drills based on the exact Chapter 1–2 skills you’ve been working on.</p>
-      <div class="hero-actions"><button class="primary-btn" onclick="openTopic('${nextTopic()}')">Continue learning</button><button class="secondary-btn" onclick="showTestPicker()">Mixed test</button></div>
-    </div>
-    <div class="card stats-card">
-      <div class="readiness-ring" style="--pct:${ready}"><div class="inner"><strong>${ready}%</strong><span>test readiness</span></div></div>
-      <div class="stats-mini"><div><strong>${overallAccuracy()}%</strong><span>accuracy</span></div><div><strong>${state.streak}</strong><span>streak</span></div><div><strong>${state.questions}</strong><span>answered</span></div></div>
-    </div>
-  </section>
-  <div class="section-head"><div><h3>Learning path</h3><p>Master a topic to level up. You can still open any topic below.</p></div></div>
-  <div class="path">${TOPICS.map(t=>{const s=topicStat(t.id);return `<div class="path-step ${s.mastery>=80?'mastered':''}" onclick="openTopic('${t.id}')"><div class="num">${t.n}</div><h4>${t.name}</h4><p>${s.mastery>=80?'Mastered • Level '+s.level: s.mastery+'% mastery'}</p></div>`}).join('')}</div>
-  <div class="section-head"><div><h3>Choose a topic</h3><p>Learn, practice, review mistakes, or challenge yourself.</p></div></div>
-  <div class="topic-grid">${TOPICS.map(t=>topicCard(t)).join('')}</div>
-  `+bottomNav('home');
-}
-function nextTopic(){return (TOPICS.find(t=>topicStat(t.id).mastery<80)||TOPICS[0]).id}
-function topicCard(t){const s=topicStat(t.id);return `<div class="card topic-card" onclick="openTopic('${t.id}')"><div class="topic-icon">${t.icon}</div><h4>${t.name}</h4><p>${t.desc}</p><div class="topic-footer"><div class="progress"><i style="width:${s.mastery}%"></i></div><span class="level-badge">L${s.level}</span></div></div>`}
-function openTopic(id){view={screen:'topic',topicId:id,mode:null};session=null;render()}
-
-function renderTopic(){
-  const t=topic(view.topicId),s=topicStat(t.id);const mistakes=Object.values(s.mistakes).reduce((a,b)=>a+b,0);
-  const rapid = t.id==='debits'?`<button class="mode-card" onclick="startRapid()"><div class="mode-icon">⚡</div><b>Rapid Fire</b><span>10-second debit-or-credit decisions. Train instant recall.</span></button>`:'';
-  app.innerHTML=topbar()+`<div class="screen-head"><button class="back-btn" onclick="goHome()">←</button><div><h2>${t.icon} ${t.name}</h2><p>${s.mastery}% mastery • Level ${s.level} • ${accuracy(s)}% accuracy</p></div></div>
-  <div class="mode-grid">
-    <button class="mode-card" onclick="startLesson()"><div class="mode-icon">🎧</div><b>Learn</b><span>Animated cards, examples, narration, and tiny check-ins while you learn.</span></button>
-    <button class="mode-card" onclick="startPractice('${t.id}','practice')"><div class="mode-icon">🎯</div><b>Practice</b><span>Infinite questions with hints, retries, and two targeted follow-ups after a miss.</span></button>
-    <button class="mode-card" onclick="startMistakes('${t.id}')"><div class="mode-icon">🧠</div><b>Mistakes</b><span>${mistakes?mistakes+' saved weak-skill hits':'Nothing waiting yet'}.</span></button>
-    <button class="mode-card" onclick="startPractice('${t.id}','challenge')"><div class="mode-icon">🔥</div><b>Challenge</b><span>10 harder questions. Score 80%+ to push mastery and unlock the next level.</span></button>
-    ${rapid}
-  </div>`+bottomNav();
-}
-
-const LESSONS={
- basics:[
-  {title:'The accounting equation',body:'Everything starts with three buckets: assets are resources the business controls, liabilities are amounts it owes, and equity is the owner’s claim.',formula:'Assets = Liabilities + Equity',example:'If assets are $88,000 and liabilities are $17,000, equity must be $71,000.',q:'Which item is a liability?',opts:['Cash','Accounts Payable','Equipment'],a:1},
-  {title:'Revenue, expenses, and income',body:'Revenue increases equity through earning activities. Expenses are costs used to earn revenue and decrease equity. Withdrawals also decrease equity, but they are not expenses.',formula:'Net Income = Revenues − Expenses',example:'Revenue $14,000 − Expenses $11,890 = Net income $2,110.',q:'Which item is NOT an expense?',opts:['Rent','Owner withdrawal','Utilities'],a:1},
-  {title:'Which statement?',body:'The income statement reports revenue and expenses. The owner’s equity statement explains the change in equity. The balance sheet reports assets, liabilities, and equity at one date. The statement of cash flows explains cash in and out.',example:'“As of October 31” usually points to a balance sheet. “For the month ended October 31” describes a period.',q:'Which statement lists assets and liabilities?',opts:['Income statement','Balance sheet','Statement of cash flows'],a:1},
-  {title:'Accounts receivable',body:'When work is completed but the customer has not paid yet, the business has earned revenue and also has an asset called Accounts Receivable.',example:'Bill a client $10,000: Accounts Receivable +$10,000 and Revenue +$10,000. It is still only $10,000 earned.',q:'A client owes the business money. What account is that?',opts:['Accounts Receivable','Accounts Payable','Unearned Revenue'],a:0}
- ],
- transactions:[
-  {title:'Read the verbs first',body:'Transaction analysis gets easier when you translate the wording into account changes. “Paid cash” means Cash decreases. “On credit” often means Accounts Payable increases. “Billed a client” means Accounts Receivable increases.',example:'Purchased equipment on credit → Equipment ↑ and Accounts Payable ↑.',q:'“Paid on account” means which liability changes?',opts:['Accounts Payable decreases','Accounts Payable increases','Revenue increases'],a:0},
-  {title:'Asset swaps',body:'Some transactions only move value between two assets. Total assets do not change.',example:'Buy $1,300 of supplies for cash → Supplies ↑ $1,300; Cash ↓ $1,300.',q:'Buying supplies for cash changes total assets by…',opts:['Increase','Decrease','No net change'],a:2},
-  {title:'Earn now vs collect later',body:'When services are provided on account, revenue is earned immediately even though cash is not received. Later, collection only swaps Accounts Receivable for Cash.',example:'Bill client → A/R ↑, Revenue ↑. Collect later → Cash ↑, A/R ↓.',q:'When you collect an old receivable, does revenue increase again?',opts:['Yes','No'],a:1},
-  {title:'Expenses and advances',body:'Paying a current expense in cash decreases assets and equity. Receiving cash before doing the work increases Cash and Unearned Revenue because the service is still owed.',q:'Customer pays before work is done. Which liability increases?',opts:['Accounts Payable','Unearned Revenue','Salaries Payable'],a:1}
- ],
- operations:[
-  {title:'One roll-forward pattern',body:'For any account, start with the beginning balance, add what increases the account, subtract what decreases it, and arrive at the ending balance.',formula:'Beginning + Increases − Decreases = Ending',example:'Cash: Beginning + Receipts − Payments = Ending.',q:'Collections from customers do what to Accounts Receivable?',opts:['Increase it','Decrease it'],a:1},
-  {title:'Accounts Receivable',body:'Services performed on account increase Accounts Receivable. Collections decrease it.',formula:'Beginning A/R + Services on Account − Collections = Ending A/R',example:'2,080 + ? − 14,560 = 3,100.',q:'Which belongs in the “increase” spot?',opts:['Collections','Services on account'],a:1},
-  {title:'Supplies and Accounts Payable',body:'Purchasing supplies increases Supplies; using supplies decreases Supplies. Purchases on account increase Accounts Payable; payments on account decrease Accounts Payable.',formula:'Beg. Supplies + Purchases − Used = End. Supplies',example:'Beg. A/P + Purchases on Account − Payments = End. A/P.',q:'Payments on account do what to A/P?',opts:['Increase','Decrease'],a:1},
-  {title:'Unearned Revenue',body:'Cash received in advance increases Unearned Revenue. When the business finally performs the service, Unearned Revenue decreases and earned revenue is recognized.',formula:'Beginning Unearned + Advances − Services Earned = Ending Unearned',q:'Performing prepaid work makes Unearned Revenue…',opts:['Increase','Decrease'],a:1}
- ],
- equations:[
-  {title:'Start with the main equations',body:'You do not need to hide the formulas while learning. Use them as a map, fill in the known numbers, and solve the missing spot.',formula:'Assets = Liabilities + Equity',example:'88,000 = 17,000 + ____',q:'To find equity, what do you do?',opts:['Assets − Liabilities','Assets + Liabilities'],a:0},
-  {title:'Owner’s equity roll-forward',body:'Investment and net income add to equity. Withdrawals subtract from equity.',formula:'Beginning Equity + Investment + Net Income − Withdrawals = Ending Equity',example:'40,000 + 0 + ____ − 15,000 = 70,000',q:'When solving for Net Income, withdrawals usually get…',opts:['Added back','Subtracted again'],a:0},
-  {title:'Net income can be negative',body:'If expenses are larger than revenues, net income is negative — that is a net loss. Negative income still plugs into the equity equation.',formula:'Net Income = Revenues − Expenses',example:'−3,000 = 99,000 − Expenses → Expenses = 102,000.',q:'If expenses exceed revenues, you have…',opts:['Net income','Net loss'],a:1},
-  {title:'Two-step problems',body:'Harder questions may require one equation to find equity and another to find the requested amount. We guide you step by step at first, then give the full problem once you level up.',example:'1) Equity = Assets − Liabilities. 2) Use the equity roll-forward.',q:'What should you find first when given assets and liabilities?',opts:['Equity','Revenue'],a:0}
- ],
- debits:[
-  {title:'Debit and credit are sides',body:'Debit does not always mean increase, and credit does not always mean decrease. Debit is the left side of an account; credit is the right side.',q:'Is “debit means increase for every account” true?',opts:['True','False'],a:1},
-  {title:'Accounts that increase with debits',body:'Assets, Expenses, and Withdrawals increase with debits.',formula:'Debit ↑: Assets, Expenses, Withdrawals',example:'Cash ↑ → Debit. Rent Expense ↑ → Debit. Withdrawals ↑ → Debit.',q:'Wages Expense increases with a…',opts:['Debit','Credit'],a:0},
-  {title:'Accounts that increase with credits',body:'Liabilities, Capital, and Revenue increase with credits.',formula:'Credit ↑: Liabilities, Capital, Revenue',example:'Accounts Payable ↑ → Credit. Service Revenue ↑ → Credit.',q:'Accounts Payable increases with a…',opts:['Debit','Credit'],a:1},
-  {title:'Watch the last word',body:'The last word often tells you the account type. Wages Payable is a liability. Salaries Expense is an expense. Those two words matter more than “wages” or “salaries.”',q:'Which normally has a credit balance?',opts:['Salaries Expense','Wages Payable'],a:1}
- ],
- statements:[
-  {title:'Income statement',body:'Only revenue and expense accounts belong on the income statement. Assets, liabilities, investments, and withdrawals do not.',formula:'Net Income = Revenues − Expenses',q:'Does Cash go on the income statement?',opts:['Yes','No'],a:1},
-  {title:'Statement of owner’s equity',body:'This statement starts with beginning capital, adds investment and net income, subtracts withdrawals, and ends with capital at the end of the period.',formula:'Beg. Capital + Investment + Net Income − Withdrawals = End. Capital',q:'Do owner withdrawals reduce ending capital?',opts:['Yes','No'],a:0},
-  {title:'Balance sheet',body:'The balance sheet uses assets, liabilities, and ending owner’s equity. It is dated at a specific point in time.',formula:'Assets = Liabilities + Ending Equity',q:'Which belongs on the balance sheet?',opts:['Rent Expense','Accounts Receivable','Consulting Revenue'],a:1},
-  {title:'Statements connect',body:'Net income from the income statement feeds into owner’s equity. Ending equity then feeds into the balance sheet.',example:'Income Statement → Owner’s Equity Statement → Balance Sheet.',q:'Where does net income flow next?',opts:['Owner’s equity statement','Accounts payable ledger'],a:0}
- ],
- journal:[
-  {title:'Journal-entry method',body:'First identify the accounts. Second decide whether each account increased or decreased. Third apply the debit/credit rules. Finally confirm total debits equal total credits.',q:'Total debits must equal total credits?',opts:['Yes','No'],a:0},
-  {title:'Cash vs accounts receivable',body:'If the customer pays now, debit Cash. If the customer is billed and will pay later, debit Accounts Receivable. In both cases, earned revenue is credited.',example:'Paid now: Dr Cash / Cr Revenue. Billed: Dr A/R / Cr Revenue.',q:'Client is billed for completed work. Debit…',opts:['Cash','Accounts Receivable'],a:1},
-  {title:'On account',body:'Buying on account creates Accounts Payable. Paying on account later reduces Accounts Payable.',example:'Buy supplies on account: Dr Supplies / Cr A/P. Pay A/P: Dr A/P / Cr Cash.',q:'Pay an old A/P balance. Debit…',opts:['Accounts Payable','Cash'],a:0},
-  {title:'Current expense vs prepaid',body:'A current-month utility payment is an expense now. Insurance paid for future months starts as Prepaid Insurance, an asset.',example:'Current utilities: Dr Utilities Expense / Cr Cash. Future insurance: Dr Prepaid Insurance / Cr Cash.',q:'Pay now for future insurance. Debit…',opts:['Insurance Expense','Prepaid Insurance'],a:1}
- ]
-};
-
-function startLesson(){lessonIndex=0;lessonAnswered=false;view.screen='lesson';render()}
-function renderLesson(){
-  const slides=LESSONS[view.topicId],s=slides[lessonIndex];
-  app.innerHTML=topbar()+`<div class="lesson-shell"><div class="screen-head"><button class="back-btn" onclick="openTopic('${view.topicId}')">←</button><div><h2>Learn • ${topic(view.topicId).name}</h2><p>Coach narration + quick check-ins</p></div></div>
-  <div class="card lesson-card"><div class="slide-count">CARD ${lessonIndex+1} OF ${slides.length}</div><h2>${s.title}</h2><div class="lesson-body">${s.body}</div>${s.formula?`<div class="formula-box">${s.formula}</div>`:''}${s.example?`<div class="example-box">${s.example}</div>`:''}
-  <div class="lesson-quiz"><b>Quick check</b><p>${s.q}</p><div class="choice-list">${s.opts.map((o,i)=>`<button class="choice ${lessonAnswered?(i===s.a?'correct':''):''}" onclick="answerLesson(${i})">${o}</button>`).join('')}</div></div>
-  <div class="lesson-actions"><button class="coach-btn" onclick="narrateSlide()">🔊 Read this card</button><button class="primary-btn" onclick="nextLesson()" ${lessonAnswered?'':'disabled'}>${lessonIndex===slides.length-1?'Finish lesson':'Next card →'}</button></div></div></div>`+bottomNav();
-  if(!lessonAnswered) setTimeout(()=>speak(s.title+'. '+s.body+' '+(s.example||'')+' Quick check. '+s.q),300);
-}
-function narrateSlide(){const s=LESSONS[view.topicId][lessonIndex];speak(s.title+'. '+s.body+' '+(s.formula||'')+' '+(s.example||'')+' Quick check. '+s.q,true)}
-function answerLesson(i){const s=LESSONS[view.topicId][lessonIndex];if(i===s.a){lessonAnswered=true;speak('Correct. '+(s.example||''));render()}else{speak('Not quite. '+s.body);toast('Try that one again') }}
-function nextLesson(){if(!lessonAnswered)return; if(lessonIndex<LESSONS[view.topicId].length-1){lessonIndex++;lessonAnswered=false;render()}else{const st=topicStat(view.topicId);st.mastery=Math.min(100,st.mastery+8);saveState();confetti();openTopic(view.topicId)}}
-
-const ACCOUNT_META={
- 'Cash':['Asset','Debit'], 'Accounts Receivable':['Asset','Debit'], 'Supplies':['Asset','Debit'], 'Office Supplies':['Asset','Debit'], 'Equipment':['Asset','Debit'], 'Office Equipment':['Asset','Debit'], 'Prepaid Insurance':['Asset','Debit'], 'Land':['Asset','Debit'], 'Building':['Asset','Debit'],
- 'Accounts Payable':['Liability','Credit'],'Wages Payable':['Liability','Credit'],'Salaries Payable':['Liability','Credit'],'Unearned Revenue':['Liability','Credit'],'Unearned Legal Fees Revenue':['Liability','Credit'],
- 'Owner’s Capital':['Equity','Credit'],'Capital':['Equity','Credit'],'Service Revenue':['Revenue','Credit'],'Consulting Revenue':['Revenue','Credit'],'Design Revenue':['Revenue','Credit'],'Legal Fees Revenue':['Revenue','Credit'],
- 'Rent Expense':['Expense','Debit'],'Utilities Expense':['Expense','Debit'],'Salaries Expense':['Expense','Debit'],'Wages Expense':['Expense','Debit'],'Insurance Expense':['Expense','Debit'],'Advertising Expense':['Expense','Debit'],'Owner’s Withdrawals':['Withdrawals','Debit']
-};
-
-function qbase(topicId,skill,prompt,extra={}){return {id:Date.now()+Math.random(),topic:topicId,skill,prompt,type:'mcq',attempts:0,...extra}}
-function generateQuestion(topicId, level=1, skill=null){
-  const map={basics:genBasics,transactions:genTransaction,operations:genOperations,equations:genEquations,debits:genDebits,statements:genStatements,journal:genJournal};
-  return map[topicId](level,skill);
-}
-function genBasics(level,skill){
-  const items=[
-    ()=>mcqQ('basics','accounting equation','The relationship Assets = Liabilities + Equity is called the:', ['Accounting equation','Income statement equation','Return on equity ratio','Business revenue equation'],0,'It is the basic equation that keeps the balance sheet in balance.'),
-    ()=>mcqQ('basics','balance sheet','Which statement reports assets, liabilities, and equity as of a specific date?', ['Income statement','Balance sheet','Statement of cash flows','Statement of owner’s equity'],1,'“As of a specific date” is the balance sheet clue.'),
-    ()=>mcqQ('basics','assets','Resources expected to provide future benefits are:', ['Liabilities','Assets','Expenses','Withdrawals'],1,'Cash, receivables, supplies, and equipment are assets.'),
-    ()=>mcqQ('basics','liabilities',pick(['Creditors’ claims on company assets are called:','Amounts the business owes outsiders are called:']), ['Revenue','Liabilities','Expenses','Equity'],1,'Liabilities are obligations owed to creditors.'),
-    ()=>mcqQ('basics','income statement','Which statement reports revenues, expenses, and profit or loss?', ['Balance sheet','Statement of cash flows','Income statement','Statement of owner’s equity'],2,'Revenue minus expenses is reported on the income statement.'),
-    ()=>mcqQ('basics','withdrawals','A distribution of business assets to the owner for personal use is called:', ['Expense','Withdrawal','Liability','Revenue'],1,'Withdrawals decrease equity, but they are not expenses.'),
-    ()=>mcqQ('basics','accounts receivable','An asset created when services are provided on credit is:', ['Accounts Payable','Accounts Receivable','Unearned Revenue','Capital'],1,'Accounts Receivable means the customer owes the business.'),
-    ()=>mcqQ('basics','cash flows','Which statement identifies where cash came from and where it went during a period?', ['Statement of cash flows','Balance sheet','Income statement','Trial balance'],0,'The cash flow statement explains cash inflows and outflows.')
-  ];return pick(skill?items.filter(f=>true):items)()
-}
-function mcqQ(t,skill,prompt,opts,idx,explanation){
-  const correct=opts[idx];const sh=shuffle(opts);return qbase(t,skill,prompt,{options:sh,answer:sh.indexOf(correct),hint1:hintForSkill(skill),hint2:explanation,explanation})
-}
-function hintForSkill(skill){
-  const h={
-    'accounts receivable':'Think: money the customer owes the business.','accounts payable':'“Payable” means the business owes someone else.','normal balance':'Classify the account first, then use debit/credit rules.','roll-forward':'Start with Beginning + Increases − Decreases = Ending.','unearned revenue':'Cash came first, but the service is still owed.','equity':'Start with Assets = Liabilities + Equity.','net income':'Only revenue and expenses belong in this calculation.','withdrawals':'Withdrawals reduce equity but are not expenses.','journal':'Identify accounts, then increase/decrease, then debit/credit.'
-  };return h[skill]||'Classify what changed before choosing the answer.'
-}
-
-function genTransaction(level,skill){
-  const patterns=[
-    {skill:'asset swap',text:(n)=>`A company buys ${money(n)} of supplies and pays cash immediately. What happens?`,correct:(n)=>`Supplies ↑ ${money(n)}; Cash ↓ ${money(n)} • Total assets: no net change`,alts:(n)=>[`Supplies ↑ ${money(n)}; A/P ↑ ${money(n)} • Assets ↑, Liabilities ↑`,`Cash ↓ ${money(n)}; Equity ↓ ${money(n)} • Assets ↓, Equity ↓`,`Cash ↑ ${money(n)}; Supplies ↓ ${money(n)} • Total assets: no net change`],hint:'Both accounts are assets. One goes up while the other goes down.'},
-    {skill:'owner investment',text:n=>`The owner invests ${money(n)} cash in the business. What happens?`,correct:n=>`Cash ↑ ${money(n)}; Capital ↑ ${money(n)} • Assets ↑, Equity ↑`,alts:n=>[`Cash ↑ ${money(n)}; A/P ↑ ${money(n)} • Assets ↑, Liabilities ↑`,`Cash ↓ ${money(n)}; Capital ↓ ${money(n)} • Assets ↓, Equity ↓`,`A/R ↑ ${money(n)}; Revenue ↑ ${money(n)} • Assets ↑, Equity ↑`],hint:'Money from the owner is investment, not borrowed money.'},
-    {skill:'purchase on credit',text:n=>`The business purchases equipment costing ${money(n)} on credit. What happens?`,correct:n=>`Equipment ↑ ${money(n)}; Accounts Payable ↑ ${money(n)} • Assets ↑, Liabilities ↑`,alts:n=>[`Equipment ↑ ${money(n)}; Cash ↓ ${money(n)} • Total assets: no net change`,`Cash ↑ ${money(n)}; Capital ↑ ${money(n)} • Assets ↑, Equity ↑`,`Equipment ↓ ${money(n)}; A/P ↓ ${money(n)} • Assets ↓, Liabilities ↓`],hint:'“On credit” means no cash now; the business owes the supplier.'},
-    {skill:'bank loan',text:n=>`The company borrows ${money(n)} cash from a bank. What happens?`,correct:n=>`Cash ↑ ${money(n)}; Note Payable ↑ ${money(n)} • Assets ↑, Liabilities ↑`,alts:n=>[`Cash ↑ ${money(n)}; Capital ↑ ${money(n)} • Assets ↑, Equity ↑`,`Cash ↓ ${money(n)}; Note Payable ↓ ${money(n)} • Assets ↓, Liabilities ↓`,`A/R ↑ ${money(n)}; Revenue ↑ ${money(n)} • Assets ↑, Equity ↑`],hint:'Borrowed money must be paid back, so it creates a liability.'},
-    {skill:'pay accounts payable',text:n=>`The company pays ${money(n)} cash on an amount it owed from an earlier purchase. What happens?`,correct:n=>`Cash ↓ ${money(n)}; Accounts Payable ↓ ${money(n)} • Assets ↓, Liabilities ↓`,alts:n=>[`Cash ↓ ${money(n)}; Expense ↑ ${money(n)} • Assets ↓, Equity ↓`,`Supplies ↓ ${money(n)}; Cash ↓ ${money(n)} • Assets ↓`,`Cash ↑ ${money(n)}; A/P ↓ ${money(n)} • Assets ↑, Liabilities ↓`],hint:'This is paying an old liability, not recording a new expense.'},
-    {skill:'bill client',text:n=>`A company completes ${money(n)} of services and bills the client. What happens?`,correct:n=>`Accounts Receivable ↑ ${money(n)}; Revenue ↑ ${money(n)} • Assets ↑, Equity ↑`,alts:n=>[`Cash ↑ ${money(n)}; Revenue ↑ ${money(n)} • Assets ↑, Equity ↑`,`Accounts Receivable ↑ ${money(n)}; A/P ↑ ${money(n)} • Assets ↑, Liabilities ↑`,`Cash ↑ ${money(n)}; A/R ↓ ${money(n)} • Total assets: no net change`],hint:'The work is complete, so revenue is earned. “Bills the client” means A/R, not Cash.'},
-    {skill:'collect accounts receivable',text:n=>`A customer pays ${money(n)} that was billed in the previous month. What happens?`,correct:n=>`Cash ↑ ${money(n)}; Accounts Receivable ↓ ${money(n)} • Total assets: no net change`,alts:n=>[`Cash ↑ ${money(n)}; Revenue ↑ ${money(n)} • Assets ↑, Equity ↑`,`Cash ↓ ${money(n)}; A/R ↓ ${money(n)} • Assets ↓`,`A/R ↑ ${money(n)}; Revenue ↑ ${money(n)} • Assets ↑, Equity ↑`],hint:'Revenue was earned when the work was done. Now you are only collecting the receivable.'},
-    {skill:'cash expense',text:n=>`The business pays ${money(n)} cash for rent for the current month. What happens?`,correct:n=>`Cash ↓ ${money(n)}; Rent Expense ↑ ${money(n)} • Assets ↓, Equity ↓`,alts:n=>[`Cash ↓ ${money(n)}; A/P ↓ ${money(n)} • Assets ↓, Liabilities ↓`,`Cash ↑ ${money(n)}; Revenue ↑ ${money(n)} • Assets ↑, Equity ↑`,`Prepaid Rent ↑ ${money(n)}; Cash ↓ ${money(n)} • Total assets: no net change`],hint:'Current-month rent is an expense now.'},
-    {skill:'expense on account',text:n=>`A utility bill of ${money(n)} is received for this month and will be paid next month. What happens?`,correct:n=>`Utilities Expense ↑ ${money(n)}; Accounts Payable ↑ ${money(n)} • Liabilities ↑, Equity ↓`,alts:n=>[`Cash ↓ ${money(n)}; Utilities Expense ↑ ${money(n)} • Assets ↓, Equity ↓`,`Utilities Expense ↑ ${money(n)}; Cash ↑ ${money(n)} • Assets ↑, Equity ↓`,`A/P ↓ ${money(n)}; Equity ↑ ${money(n)} • Liabilities ↓, Equity ↑`],hint:'The expense happened now, but cash has not been paid yet.'},
-    {skill:'unearned revenue',text:n=>`A customer pays ${money(n)} now for work the company will perform next month. What happens?`,correct:n=>`Cash ↑ ${money(n)}; Unearned Revenue ↑ ${money(n)} • Assets ↑, Liabilities ↑`,alts:n=>[`Cash ↑ ${money(n)}; Revenue ↑ ${money(n)} • Assets ↑, Equity ↑`,`A/R ↑ ${money(n)}; Revenue ↑ ${money(n)} • Assets ↑, Equity ↑`,`Cash ↓ ${money(n)}; Unearned Revenue ↓ ${money(n)} • Assets ↓, Liabilities ↓`],hint:'The company has the cash but still owes the service.'}
-  ];
-  const p = skill ? patterns.find(x=>x.skill===skill) || pick(patterns) : pick(patterns);const n=rand(4,90)*100;
-  const correct=p.correct(n), options=shuffle([correct,...p.alts(n)]);
-  return qbase('transactions',p.skill,p.text(n),{options,answer:options.indexOf(correct),hint1:p.hint,hint2:'Identify the exact accounts first, then translate them to Assets, Liabilities, or Equity.',explanation:correct,visual:correct.split(' • ')[0]});
-}
-
-function makeRollForward(name,formula,increaseLabel,decreaseLabel){
-  const beg=rand(2,90)*100, inc=rand(15,120)*100, dec=rand(10,110)*100;
-  let end=beg+inc-dec;if(end<0)return makeRollForward(name,formula,increaseLabel,decreaseLabel);
-  const miss=pick(['begin','increase','decrease','end']);
-  let answer,filled,prompt;
-  if(miss==='begin'){answer=beg;filled=`____ + ${num(inc)} − ${num(dec)} = ${num(end)}`;prompt=`Find the beginning ${name} balance.`}
-  if(miss==='increase'){answer=inc;filled=`${num(beg)} + ____ − ${num(dec)} = ${num(end)}`;prompt=`Find ${increaseLabel}.`}
-  if(miss==='decrease'){answer=dec;filled=`${num(beg)} + ${num(inc)} − ____ = ${num(end)}`;prompt=`Find ${decreaseLabel}.`}
-  if(miss==='end'){answer=end;filled=`${num(beg)} + ${num(inc)} − ${num(dec)} = ____`;prompt=`Find the ending ${name} balance.`}
-  return qbase('operations','roll-forward',prompt,{type:'fill',answer,equation:formula,filled,hint1:'Use Beginning + Increases − Decreases = Ending.',hint2:`${increaseLabel} increase ${name}; ${decreaseLabel} decrease ${name}.`,explanation:`${filled.replace('____',num(answer))}. The answer is ${money(answer)}.`});
-}
-function genOperations(level,skill){
-  if(skill==='normal balance' || (!skill && Math.random()<.32)){
-    const accounts=[['Cash','Asset','Debit'],['Office Equipment','Asset','Debit'],['Wages Payable','Liability','Credit'],['Owner’s Withdrawals','Withdrawals','Debit'],['Sales Salaries Expense','Expense','Debit'],['Unearned Revenue','Liability','Credit'],['Owner’s Capital','Equity','Credit']];
-    const [a,type,bal]=pick(accounts);return mcqQ('operations','normal balance',`What is the normal balance of ${a}?`,['Debit','Credit'],bal==='Debit'?0:1,`${a} is a ${type} account, so its normal balance is ${bal}.`)
-  }
-  const kinds=[
-    ()=>makeRollForward('Cash','Beginning Cash + Cash Receipts − Cash Payments = Ending Cash','Cash receipts','Cash payments'),
-    ()=>makeRollForward('Accounts Receivable','Beginning A/R + Services on Account − Collections = Ending A/R','Services on account','Collections on account'),
-    ()=>makeRollForward('Supplies','Beginning Supplies + Purchases − Supplies Used = Ending Supplies','Supplies purchased','Supplies used'),
-    ()=>makeRollForward('Accounts Payable','Beginning A/P + Purchases on Account − Payments on Account = Ending A/P','Purchases on account','Payments on account'),
-    ()=>makeRollForward('Unearned Revenue','Beginning Unearned + Advance Payments − Services Earned = Ending Unearned','Advance payments received','Services provided to prepaid customers')
-  ];return pick(kinds)()
-}
-
-function genEquations(level,skill){
-  const r=Math.random();
-  if(skill==='two-step' || (!skill && level>=2 && r<.38)){
-    const begA=rand(8,35)*1000,begL=rand(3,Math.floor(begA/1000)-2)*1000;const begE=begA-begL;
-    const inv=rand(0,12)*1000, ni=rand(-4,10)*1000, wd=rand(0,6)*1000;const endE=begE+inv+ni-wd;
-    const endL=rand(4,18)*1000,endA=endE+endL; const rev=rand(50,110)*1000; const exp=rev-ni;
-    return qbase('equations','two-step',`Beginning assets are ${money(begA)} and beginning liabilities are ${money(begL)}. The owner invested ${money(inv)}, withdrew ${money(wd)}, and revenues were ${money(rev)}. Ending assets are ${money(endA)} and ending liabilities are ${money(endL)}. Find expenses.`,{type:'fill',answer:exp,equation:'Step 1: Equity = Assets − Liabilities  •  Step 2: Beg. Equity + Investment + Net Income − Withdrawals = End. Equity  •  Step 3: Net Income = Revenue − Expenses',filled:'Use each equation in order; solve the missing value from one step before moving to the next.',hint1:'First calculate beginning equity and ending equity.',hint2:'Then solve for Net Income. Finally use Net Income = Revenue − Expenses.',explanation:`Beginning equity = ${money(begE)}. Ending equity = ${money(endE)}. Net income = ${money(ni)}. Expenses = ${money(exp)}.`})
-  }
-  if(skill==='equity' || (!skill && r<.58)){
-    const L=rand(10,80)*1000,E=rand(20,100)*1000,A=L+E;const miss=pick(['A','L','E']);
-    let ans,filled,prompt;
-    if(miss==='E'){ans=E;filled=`${num(A)} = ${num(L)} + ____`;prompt=`A company has assets of ${money(A)} and liabilities of ${money(L)}. Find owner’s equity.`}
-    if(miss==='L'){ans=L;filled=`${num(A)} = ____ + ${num(E)}`;prompt=`A company has assets of ${money(A)} and equity of ${money(E)}. Find liabilities.`}
-    if(miss==='A'){ans=A;filled=`____ = ${num(L)} + ${num(E)}`;prompt=`A company has liabilities of ${money(L)} and equity of ${money(E)}. Find assets.`}
-    return qbase('equations','equity',prompt,{type:'fill',answer:ans,equation:'Assets = Liabilities + Equity',filled,hint1:'Keep the accounting equation balanced. Undo the known side to isolate the blank.',hint2:miss==='E'?'Equity = Assets − Liabilities.':miss==='L'?'Liabilities = Assets − Equity.':'Assets = Liabilities + Equity.',explanation:`${filled.replace('____',num(ans))}. Answer: ${money(ans)}.`})
-  }
-  const beg=rand(5,60)*1000,inv=rand(0,20)*1000,ni=rand(-5,25)*1000,wd=rand(0,10)*1000,end=beg+inv+ni-wd;
-  const miss=pick(['beg','inv','ni','wd','end']);let ans,filled,prompt;
-  if(miss==='beg'){ans=beg;filled=`____ + ${num(inv)} + ${num(ni)} − ${num(wd)} = ${num(end)}`;prompt='Find beginning equity.'}
-  if(miss==='inv'){ans=inv;filled=`${num(beg)} + ____ + ${num(ni)} − ${num(wd)} = ${num(end)}`;prompt='Find owner investment.'}
-  if(miss==='ni'){ans=ni;filled=`${num(beg)} + ${num(inv)} + ____ − ${num(wd)} = ${num(end)}`;prompt='Find net income (a negative answer means net loss).' }
-  if(miss==='wd'){ans=wd;filled=`${num(beg)} + ${num(inv)} + ${num(ni)} − ____ = ${num(end)}`;prompt='Find withdrawals.'}
-  if(miss==='end'){ans=end;filled=`${num(beg)} + ${num(inv)} + ${num(ni)} − ${num(wd)} = ____`;prompt='Find ending equity.'}
-  return qbase('equations','equity roll-forward',prompt,{type:'fill',answer:ans,equation:'Beginning Equity + Investment + Net Income − Withdrawals = Ending Equity',filled,hint1:'Added items are Investment and Net Income. Withdrawals are subtracted.',hint2:'To isolate the blank, undo everything else with the opposite operation.',explanation:`${filled.replace('____',num(ans))}. Answer: ${money(ans)}.`})
-}
-
-function genDebits(level,skill){
-  const accounts=[
-    ['Cash','Asset','Debit'],['Accounts Receivable','Asset','Debit'],['Supplies','Asset','Debit'],['Prepaid Insurance','Asset','Debit'],['Equipment','Asset','Debit'],['Accounts Payable','Liability','Credit'],['Wages Payable','Liability','Credit'],['Unearned Revenue','Liability','Credit'],['Owner’s Capital','Equity','Credit'],['Service Revenue','Revenue','Credit'],['Wages Expense','Expense','Debit'],['Rent Expense','Expense','Debit'],['Owner’s Withdrawals','Withdrawals','Debit']
-  ];
-  const [a,type,normal]=pick(accounts);const askIncrease=Math.random()<.7;const correct=askIncrease?normal:(normal==='Debit'?'Credit':'Debit');
-  return mcqQ('debits','debit-credit',`${a} ${askIncrease?'increases':'decreases'}. Which side records it?`,['Debit','Credit'],correct==='Debit'?0:1,`${a} is a ${type}. Its normal/increase side is ${normal}, so a ${askIncrease?'increase':'decrease'} is a ${correct}.`)
-}
-
-function genStatements(level,skill){
-  const accountSets={income:['Consulting Fees Earned','Rent Expense','Salaries Expense','Telephone Expense','Miscellaneous Expense'],balance:['Cash','Accounts Receivable','Office Supplies','Land','Office Equipment','Accounts Payable','Ending Capital']};
-  const r=Math.random();
-  if(skill==='income statement items' || (!skill && r<.35)){
-    const pool=['Cash','Accounts Receivable','Consulting Fees Earned','Rent Expense','Accounts Payable','Owner Investment','Owner Withdrawals','Office Equipment'];const selected=shuffle(pool).slice(0,6);const ans=selected.filter(x=>['Consulting Fees Earned','Rent Expense'].includes(x));
-    return qbase('statements','income statement items','Select every item that belongs on an income statement.',{type:'multi',options:selected,answer:ans,hint1:'The income statement uses only revenues and expenses.',hint2:'Assets, liabilities, investments, and withdrawals stay off the income statement.',explanation:'Income statement = revenues and expenses only.'})
-  }
-  if(skill==='income statement' || (!skill && r<.7)){
-    const rev=rand(12,60)*1000;const expenses=[rand(1,8)*1000,rand(2,10)*1000,rand(1,5)*500];const tot=expenses.reduce((a,b)=>a+b,0),ni=rev-tot;
-    return qbase('statements','income statement',`Consulting revenue is ${money(rev)}. Rent expense is ${money(expenses[0])}, salaries expense is ${money(expenses[1])}, and other expense is ${money(expenses[2])}. Find net income.`,{type:'fill',answer:ni,equation:'Net Income = Revenue − Total Expenses',filled:`____ = ${num(rev)} − (${expenses.map(num).join(' + ')})`,hint1:'Add all expenses first, then subtract the total from revenue.',hint2:'Do not include assets or withdrawals in net income.',explanation:`Total expenses = ${money(tot)}. Net income = ${money(ni)}.`})
-  }
-  const beg=0,inv=rand(50,100)*1000,ni=rand(1,15)*1000,wd=rand(1,5)*1000,end=beg+inv+ni-wd;const ap=rand(4,15)*1000,assets=end+ap;
-  return qbase('statements','statement connection',`A new business has owner investment ${money(inv)}, net income ${money(ni)}, withdrawals ${money(wd)}, and Accounts Payable ${money(ap)}. What total assets must appear on the balance sheet?`,{type:'fill',answer:assets,equation:'Ending Equity = Beg. Equity + Investment + Net Income − Withdrawals  •  Assets = Liabilities + Ending Equity',filled:`Ending Equity = 0 + ${num(inv)} + ${num(ni)} − ${num(wd)}; then Assets = ${num(ap)} + Ending Equity`,hint1:'Find ending equity first.',hint2:'Then add liabilities to ending equity to get total assets.',explanation:`Ending equity = ${money(end)}. Total assets = ${money(assets)}.`})
-}
-
-function journalQuestion(skill, prompt, debit, credit, amount, multi=false){
-  const distractorPool = ['Cash','Accounts Receivable','Accounts Payable','Supplies','Equipment','Service Revenue','Unearned Revenue','Utilities Expense','Owner’s Capital','Owner’s Withdrawals','Prepaid Insurance'];
-  const required = Array.from(new Set([...debit,...credit]));
-  const distractors = shuffle(distractorPool.filter(a=>!required.includes(a))).slice(0,Math.max(3,8-required.length));
-  const all = shuffle([...required,...distractors]);
-  if(Math.random()<.55 || multi){
-    return qbase('journal',skill,prompt,{type:'journal',accounts:all,debit,credit,amount,hint1:'Identify which accounts increased or decreased before choosing debit or credit.',hint2:`Debit: ${debit.join(', ')}. Credit: ${credit.join(', ')}.`,explanation:`Debit ${debit.join(' + ')}; Credit ${credit.join(' + ')}. Total debits equal total credits.`})
-  }
-  const correct=`Dr ${debit.join(' + ')} / Cr ${credit.join(' + ')}`;
-  const opts=shuffle([correct,`Dr ${credit.join(' + ')} / Cr ${debit.join(' + ')}`,`Dr Cash / Cr Accounts Payable`,`Dr ${debit[0]} / Cr Cash`]);
-  return qbase('journal',skill,prompt,{options:opts,answer:opts.indexOf(correct),hint1:'First decide what increased and decreased.',hint2:`Correct pattern: ${correct}.`,explanation:correct})
-}
-function genJournal(level,skill){
-  const n=rand(3,60)*100;
-  const patterns={
-    'owner investment':()=>journalQuestion('owner investment',`The owner invests ${money(n)} cash in the business.`,['Cash'],['Owner’s Capital'],n),
-    'supplies for cash':()=>journalQuestion('supplies for cash',`The company buys ${money(n)} of supplies and pays cash immediately.`,['Supplies'],['Cash'],n),
-    'supplies on account':()=>journalQuestion('supplies on account',`The company buys ${money(n)} of supplies on credit.`,['Supplies'],['Accounts Payable'],n),
-    'pay accounts payable':()=>journalQuestion('pay accounts payable',`The company pays ${money(n)} on an Accounts Payable balance from a prior purchase.`,['Accounts Payable'],['Cash'],n),
-    'cash revenue':()=>journalQuestion('cash revenue',`The company performs ${money(n)} of services and is paid cash immediately.`,['Cash'],['Service Revenue'],n),
-    'revenue on account':()=>journalQuestion('revenue on account',`The company performs ${money(n)} of services and bills the client.`,['Accounts Receivable'],['Service Revenue'],n),
-    'collect accounts receivable':()=>journalQuestion('collect accounts receivable',`The company collects ${money(n)} from a customer billed in a previous month.`,['Cash'],['Accounts Receivable'],n),
-    'unearned revenue':()=>journalQuestion('unearned revenue',`A customer pays ${money(n)} now for services to be performed next month.`,['Cash'],['Unearned Revenue'],n),
-    'cash expense':()=>journalQuestion('cash expense',`The business pays ${money(n)} cash for utilities used this month.`,['Utilities Expense'],['Cash'],n),
-    'expense on account':()=>journalQuestion('expense on account',`The business receives a ${money(n)} utility bill for this month and will pay next month.`,['Utilities Expense'],['Accounts Payable'],n),
-    'prepaid insurance':()=>journalQuestion('prepaid insurance',`The business pays ${money(n)} for an insurance policy covering future months.`,['Prepaid Insurance'],['Cash'],n),
-    'withdrawal':()=>journalQuestion('withdrawal',`The owner withdraws ${money(n)} cash for personal use.`,['Owner’s Withdrawals'],['Cash'],n),
-    'multiple revenue accounts':()=>{const c=rand(5,20)*100,d=rand(1,7)*100;return journalQuestion('multiple revenue accounts',`The company performs ${money(c)} of consulting work and ${money(d)} of design work for the same client and bills the total.`,['Accounts Receivable'],['Consulting Revenue','Design Revenue'],c+d,true)}
-  };
-  if(skill && patterns[skill]) return patterns[skill]();
-  if(level>=2 && Math.random()<.25) return patterns['multiple revenue accounts']();
-  return pick(Object.values(patterns).filter((_,i)=>i<12))()
-}
-
-function startPractice(topicId,mode='practice'){
-  clearInterval(hintTimer);stopSpeech();
-  session={topicId,mode,index:0,correct:0,queue:[],total:mode==='challenge'?10:null,current:null,firstMissSkills:new Set(),finished:false};
-  view={screen:'quiz',topicId,mode};nextQuestion();
-}
-function startMistakes(topicId){
-  const m=topicStat(topicId).mistakes;const skills=Object.keys(m).filter(k=>m[k]>0);
-  if(!skills.length){toast('No saved mistakes yet — nice.');return}
-  session={topicId,mode:'mistakes',index:0,correct:0,queue:[],total:Math.min(12,skills.length*2),mistakeSkills:skills,current:null,firstMissSkills:new Set()};
-  view={screen:'quiz',topicId,mode:'mistakes'};nextQuestion();
-}
-function nextQuestion(){
-  clearInterval(hintTimer);selectedMulti=new Set();journalSelections={};
-  if(session.total && session.index>=session.total){finishSession();return}
-  let q=session.queue.shift();
-  if(!q){
-    const level=topicStat(session.topicId).level;
-    let skill=null;if(session.mode==='mistakes'&&session.mistakeSkills?.length)skill=pick(session.mistakeSkills);
-    q=generateQuestion(session.topicId,level,skill);
-  }
-  q.attempts=0;q.revealed=false;q.feedback='';session.current=q;session.index++;render();startHintClock();
-}
-function renderQuiz(){
-  const q=session.current,t=topic(session.topicId);if(!q)return;
-  const count=session.total?`${session.index} / ${session.total}`:`Question ${session.index}`;
-  let body='';
-  if(q.type==='mcq') body=`<div class="choice-list">${q.options.map((o,i)=>`<button class="choice ${q.lastWrong===i?'wrong':''} ${q.revealed&&i===q.answer?'correct':''}" onclick="answerMCQ(${i})">${esc(o)}</button>`).join('')}</div>`;
-  if(q.type==='fill') body=`${q.equation?`<div class="equation-helper"><div class="label">Equation guide</div><div class="formula">${esc(q.equation)}</div>${q.filled?`<div class="filled">${esc(q.filled)}</div>`:''}</div>`:''}<input id="fillAnswer" class="answer-input" inputmode="decimal" placeholder="Enter your answer" onkeydown="if(event.key==='Enter')submitFill()"><div class="quiz-actions"><button class="coach-btn" onclick="verbalHint()">🔊 Verbal hint</button><button class="primary-btn" onclick="submitFill()">Check answer</button></div>`;
-  if(q.type==='multi') body=`<div class="choice-list multi-select">${q.options.map((o,i)=>`<button class="choice ${selectedMulti.has(o)?'selected':''}" onclick="toggleMulti('${encodeURIComponent(o)}')">${esc(o)}</button>`).join('')}</div><div class="quiz-actions"><button class="coach-btn" onclick="verbalHint()">🔊 Verbal hint</button><button class="primary-btn" onclick="submitMulti()">Check selections</button></div>`;
-  if(q.type==='journal') body=renderJournal(q);
-  const fb=q.feedback?`<div class="feedback ${q.feedbackGood?'good':'bad'}">${q.feedback}${q.showVisual?visualExplain(q):''}</div>`:'';
-  const next=q.revealed?`<div class="quiz-actions"><button class="coach-btn" onclick="speak(session.current.explanation,true)">🔊 Explain it</button><button class="primary-btn" onclick="nextQuestion()">Next →</button></div>`:'';
-  app.innerHTML=topbar()+`<div class="quiz-shell"><div class="screen-head"><button class="back-btn" onclick="openTopic('${session.topicId}')">←</button><div><h2>${session.mode==='challenge'?'Challenge':session.mode==='mistakes'?'Mistakes':'Practice'} • ${t.name}</h2><p>${count} • ${session.correct} correct this session</p></div></div>
-  <div class="card quiz-card"><div class="quiz-meta"><span class="skill-chip">${esc(q.skill)}</span><span>${q.attempts?`${q.attempts} ${q.attempts===1?'try':'tries'}`:'Take your time'}</span></div><h2>${esc(q.prompt)}</h2>${q.type==='mcq'?`<div class="quiz-actions"><button class="coach-btn" onclick="verbalHint()">🔊 Verbal hint</button><span></span></div>`:''}${body}${fb}${next}</div></div>`+bottomNav();
-}
-function renderJournal(q){
-  return `<div class="equation-helper"><div class="label">Build the journal entry</div><div class="formula">Tap Debit or Credit for each account you want to use.</div></div><div class="journal-grid">${q.accounts.map(a=>`<div class="journal-row"><b>${esc(a)}</b><button class="${journalSelections[a]==='D'?'active':''}" onclick="setJournal('${encodeURIComponent(a)}','D')">Debit</button><button class="${journalSelections[a]==='C'?'active':''}" onclick="setJournal('${encodeURIComponent(a)}','C')">Credit</button></div>`).join('')}</div><div class="quiz-actions"><button class="coach-btn" onclick="verbalHint()">🔊 Verbal hint</button><button class="primary-btn" onclick="submitJournal()">Check entry</button></div>`
-}
-function verbalHint(){const q=session.current;const text=q.attempts>=1?(q.hint2||q.hint1):q.hint1;speak(text,true);toast(text)}
-function answerMCQ(i){const q=session.current;if(q.revealed)return; if(i===q.answer)correctQuestion(); else wrongQuestion(i)}
-function submitFill(){const el=$('#fillAnswer');if(!el)return;const raw=el.value.replace(/[$,\s]/g,'');const val=Number(raw);if(!raw||Number.isNaN(val)){toast('Enter a number first');return} if(Math.abs(val-Number(session.current.answer))<.001)correctQuestion();else wrongQuestion(null)}
-function toggleMulti(enc){const o=decodeURIComponent(enc);selectedMulti.has(o)?selectedMulti.delete(o):selectedMulti.add(o);renderQuiz()}
-function submitMulti(){const a=[...selectedMulti].sort(),b=[...session.current.answer].sort();const ok=a.length===b.length&&a.every((x,i)=>x===b[i]);ok?correctQuestion():wrongQuestion(null)}
-function setJournal(enc,side){const a=decodeURIComponent(enc);journalSelections[a]=journalSelections[a]===side?null:side;renderQuiz()}
-function submitJournal(){
-  const q=session.current;const d=Object.entries(journalSelections).filter(([,v])=>v==='D').map(([a])=>a).sort();const c=Object.entries(journalSelections).filter(([,v])=>v==='C').map(([a])=>a).sort();const ed=[...q.debit].sort(),ec=[...q.credit].sort();const ok=d.length===ed.length&&c.length===ec.length&&d.every((x,i)=>x===ed[i])&&c.every((x,i)=>x===ec[i]);ok?correctQuestion():wrongQuestion(null)
-}
-function wrongQuestion(choice){
-  const q=session.current;q.attempts++;q.lastWrong=choice;clearInterval(hintTimer);
-  if(q.attempts===1){state.streak=0;saveState();q.feedback=`Not yet. Hint: ${q.hint1}`;q.feedbackGood=false;recordMistake(q);enqueueFollowups(q);speak('Not quite. '+q.hint1)}
-  else if(q.attempts===2){q.feedback=`Still not quite. ${q.hint2||q.hint1}`;q.feedbackGood=false;q.showVisual=true;speak(q.hint2||q.hint1)}
-  else{q.feedback=`Here’s the pattern: ${q.explanation}`;q.feedbackGood=false;q.showVisual=true;q.revealed=true;if(!q.counted){q.counted=true;state.questions++;const ts=topicStat(q.topic);ts.answered++;saveState();}speak('Here is the pattern. '+q.explanation)}
-  renderQuiz();if(!q.revealed)startHintClock();
-}
-function recordMistake(q){const s=topicStat(q.topic);s.mistakes[q.skill]=(s.mistakes[q.skill]||0)+1;saveState()}
-function enqueueFollowups(q){
-  if(session.firstMissSkills.has(q.skill))return;session.firstMissSkills.add(q.skill);
-  session.queue.unshift(generateQuestion(q.topic,topicStat(q.topic).level,q.skill),generateQuestion(q.topic,topicStat(q.topic).level,q.skill));
-}
-function correctQuestion(){
-  const q=session.current;clearInterval(hintTimer);q.feedback=`Correct. ${q.explanation}`;q.feedbackGood=true;q.revealed=true;q.showVisual=!!q.visual;
-  session.correct++;const firstTry=q.attempts===0;if(!q.counted){q.counted=true;state.questions++;const ts=topicStat(q.topic);ts.answered++;}if(firstTry)state.correct++;state.streak++;state.bestStreak=Math.max(state.bestStreak,state.streak);
-  const s=topicStat(q.topic);if(firstTry)s.correct++;s.mastery=Math.min(100,s.mastery+(firstTry?2:1));
-  if(s.mistakes[q.skill]>0){s.mistakes[q.skill]--;if(s.mistakes[q.skill]===0)state.mistakesMastered++}
-  saveState();speak('Correct. '+q.explanation);renderQuiz();
-}
-function visualExplain(q){
-  if(q.visual){const parts=q.visual.split(';');return `<div class="visual-explain">${parts.map((p,i)=>`${i?'<div class="arrow">→</div>':''}<div class="account-box"><b>${esc(p.trim())}</b><span>Track the account change first</span></div>`).join('')}</div>`}
-  if(q.type==='journal')return `<div class="visual-explain"><div class="account-box"><b>DEBIT</b><span>${q.debit.join(', ')}</span></div><div class="arrow">↔</div><div class="account-box"><b>CREDIT</b><span>${q.credit.join(', ')}</span></div></div>`;
-  return ''
-}
-function finishSession(){
-  clearInterval(hintTimer);const s=topicStat(session.topicId);const score=Math.round(session.correct/session.total*100);
-  if(session.mode==='challenge'&&score>=80){s.mastery=Math.min(100,s.mastery+10);s.level=Math.min(5,s.level+1);saveState();confetti();toast('Level up! Harder questions unlocked.')}
-  session.finished=true;session.result={score,correct:session.correct,total:session.total};view.screen='testResult';render()
-}
-
-function startRapid(){
-  session={topicId:'debits',mode:'rapid',index:0,correct:0,total:20,current:null,timeLeft:10,rapidTimer:null};view={screen:'quiz',topicId:'debits',mode:'rapid'};nextRapid()
-}
-function nextRapid(){clearInterval(session.rapidTimer);if(session.index>=session.total){view.screen='testResult';session.result={score:Math.round(session.correct/session.total*100),correct:session.correct,total:session.total};render();return}
-  session.index++;session.current=genDebits(1);session.timeLeft=10;renderRapid();session.rapidTimer=setInterval(()=>{session.timeLeft--;const bar=$('.timer i');if(bar)bar.style.width=(session.timeLeft*10)+'%';if(session.timeLeft<=0){clearInterval(session.rapidTimer);state.streak=0;saveState();speak('Time. '+session.current.explanation);setTimeout(nextRapid,650)}},1000)
-}
-function renderRapid(){const q=session.current;app.innerHTML=topbar()+`<div class="quiz-shell"><div class="screen-head"><button class="back-btn" onclick="openTopic('debits')">←</button><div><h2>⚡ Rapid Fire</h2><p>${session.index} / ${session.total} • ${session.correct} correct</p></div></div><div class="card quiz-card"><div class="timer"><i style="width:100%"></i></div><div class="rapid">${esc(q.prompt.replace('Which side records it?',''))}</div><div class="rapid-actions"><button onclick="answerRapid('Debit')">Debit</button><button onclick="answerRapid('Credit')">Credit</button></div></div></div>`+bottomNav()}
-function answerRapid(ans){clearInterval(session.rapidTimer);const q=session.current;const correct=q.options[q.answer];state.questions++;topicStat('debits').answered++;if(ans===correct){session.correct++;state.correct++;state.streak++;topicStat('debits').correct++;topicStat('debits').mastery=Math.min(100,topicStat('debits').mastery+1);speak('Correct')}else{state.streak=0;recordMistake(q);speak('Not quite. '+q.explanation)}saveState();setTimeout(nextRapid,450)}
-
-function showTestPicker(){clearInterval(hintTimer);view={screen:'testPicker'};session=null;render()}
-function renderTestPicker(){app.innerHTML=topbar()+`<div class="screen-head"><button class="back-btn" onclick="goHome()">←</button><div><h2>✦ Mixed Test</h2><p>All 7 topics mixed together. Choose a length.</p></div></div><div class="card quiz-card"><h2>How many questions?</h2><p style="color:var(--muted)">Formulas stay visible on equation and roll-forward questions so you can focus on setting them up correctly.</p><div class="test-picker">${[10,15,20,30].map(n=>`<button onclick="startMixedTest(${n})">${n}<br><span style="color:var(--muted);font-size:11px">questions</span></button>`).join('')}</div></div>`+bottomNav('test')}
-function startMixedTest(n){session={topicId:null,mode:'mixed',index:0,correct:0,total:n,queue:[],firstMissSkills:new Set(),current:null};view={screen:'quiz',topicId:null,mode:'mixed'};nextMixed()}
-function nextMixed(){clearInterval(hintTimer);if(session.index>=session.total){view.screen='testResult';session.result={score:Math.round(session.correct/session.total*100),correct:session.correct,total:session.total};render();return}selectedMulti=new Set();journalSelections={};const tid=pick(TOPICS).id;session.topicId=tid;session.current=generateQuestion(tid,topicStat(tid).level);session.current.attempts=0;session.index++;renderMixedQuiz();startHintClock()}
-function renderMixedQuiz(){
-  // Reuse quiz renderer, but make Next continue mixed sequence.
-  const original=nextQuestion;window.__mixedNext=true;renderQuiz();const nextBtn=[...document.querySelectorAll('.quiz-actions .primary-btn')].find(b=>b.textContent.includes('Next'));if(nextBtn)nextBtn.setAttribute('onclick','nextMixed()');
-  const head=document.querySelector('.screen-head h2');if(head)head.textContent='✦ Mixed Test • '+topic(session.current.topic).name;
-  const sub=document.querySelector('.screen-head p');if(sub)sub.textContent=`${session.index} / ${session.total} • ${session.correct} correct`;
-}
-// ensure quiz rerenders correctly during mixed mode
-const baseRenderQuiz=renderQuiz;
-renderQuiz=function(){baseRenderQuiz();if(session?.mode==='mixed'){
-  const nextBtn=[...document.querySelectorAll('.quiz-actions .primary-btn')].find(b=>b.textContent.includes('Next'));if(nextBtn)nextBtn.setAttribute('onclick','nextMixed()');
-  const head=document.querySelector('.screen-head h2');if(head)head.textContent='✦ Mixed Test • '+topic(session.current.topic).name;
-  const sub=document.querySelector('.screen-head p');if(sub)sub.textContent=`${session.index} / ${session.total} • ${session.correct} correct`;
-}}
-
-function renderTestResult(){const r=session.result;const mixed=session.mode==='mixed';app.innerHTML=topbar()+`<div class="quiz-shell"><div class="card quiz-card" style="text-align:center;margin-top:34px"><div style="font-size:48px">${r.score>=80?'🏆':r.score>=60?'📈':'🧠'}</div><h2>${r.score}%</h2><p style="color:var(--muted)">${r.correct} of ${r.total} correct. ${r.score>=80?'Strong session. Keep the patterns fresh.':'Use the Mistakes sections to target what tripped you up.'}</p><div class="hero-actions" style="justify-content:center"><button class="primary-btn" onclick="${mixed?'showTestPicker()':`openTopic('${session.topicId}')`}">${mixed?'Take another mixed test':'Back to topic'}</button><button class="secondary-btn" onclick="showStats()">View progress</button></div></div></div>`+bottomNav(mixed?'test':'')}
-
-function showStats(){clearInterval(hintTimer);view={screen:'stats'};render()}
-function renderStats(){
-  const weak=[];TOPICS.forEach(t=>Object.entries(topicStat(t.id).mistakes).forEach(([skill,count])=>{if(count>0)weak.push({topic:t.name,skill,count})}));weak.sort((a,b)=>b.count-a.count);
-  app.innerHTML=topbar()+`<div class="screen-head"><button class="back-btn" onclick="goHome()">←</button><div><h2>▥ Progress</h2><p>Your accuracy, mastery, weak skills, and readiness.</p></div></div>
-  <div class="stats-grid"><div class="card stat-card"><span>Overall accuracy</span><strong>${overallAccuracy()}%</strong></div><div class="card stat-card"><span>Test readiness</span><strong>${readiness()}%</strong></div><div class="card stat-card"><span>Current streak</span><strong>${state.streak}</strong></div><div class="card stat-card"><span>Questions answered</span><strong>${state.questions}</strong></div><div class="card stat-card"><span>Best streak</span><strong>${state.bestStreak}</strong></div><div class="card stat-card"><span>Mistakes mastered</span><strong>${state.mistakesMastered}</strong></div></div>
-  <div class="section-head"><div><h3>Accuracy by topic</h3><p>Mastery rises through lessons, practice, and challenges.</p></div></div><div class="topic-grid">${TOPICS.map(t=>{const s=topicStat(t.id);return `<div class="card topic-card"><div class="topic-icon">${t.icon}</div><h4>${t.name}</h4><p>${accuracy(s)}% accuracy • ${s.answered} answered</p><div class="topic-footer"><div class="progress"><i style="width:${s.mastery}%"></i></div><span class="level-badge">${s.mastery}%</span></div></div>`}).join('')}</div>
-  <div class="section-head"><div><h3>Weakest question types</h3><p>These are based on actual misses, not guesses.</p></div></div><div class="card" style="padding:14px">${weak.length?`<div class="weak-list">${weak.slice(0,8).map(w=>`<div class="weak-row"><b>${esc(w.skill)}</b><span>${esc(w.topic)} • ${w.count} miss${w.count===1?'':'es'}</span></div>`).join('')}</div>`:`<div class="empty">No weak skills saved yet. Start practicing and this will update automatically.</div>`}</div>`+bottomNav('stats')
-}
-
-if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}))}
-render();
+function startLesson(id,index=0){cleanup();screen={name:'lesson',id};lesson={index,answered:false,feedback:'',failed:false};render();window.scrollTo(0,0);narrate()}
+function narrate(){const c=lessons[screen.id][lesson.index];speak(`${c.title}. ${c.body} ${c.example}. Quick check: ${c.question} ${c.options.map((o,i)=>`${i+1}. ${o}`).join('. ')}. Choose your answer. I’ll wait.`)}
+function lessonPage(){const t=topic(screen.id),cards=lessons[t.id],c=cards[lesson.index];layout(`<div class="practice-wrap"><div class="session-top">${button('×',session?.review?'return-session':'back','back',`data-id="${t.id}" aria-label="${session?.review?'Return to question':'Leave lesson'}"`)}<div class="dots">${cards.map((_,i)=>`<span class="dot ${i===lesson.index?'active':i<lesson.index?'done':''}"></span>`).join('')}</div><small style="margin-left:auto">${lesson.index+1} / ${cards.length}</small></div><article class="lesson" id="lesson-card"><div class="lesson-tools"><span class="eyebrow">${t.name}</span>${button('♫ Listen again','narrate','text-button')}</div><h2>${c.title}</h2><p>${c.body}</p>${visual(c.visual)}<p class="example">${c.example}</p><div class="checkpoint"><p class="eyebrow">YOUR TURN · COACH PAUSED</p><h3 style="margin-top:10px">${c.question}</h3><div class="choices">${c.options.map((o,i)=>`<button class="choice ${lesson.answered&&i===c.answer?'correct':''}" data-action="lesson-answer" data-index="${i}" ${lesson.answered?'disabled':''}><span class="letter">${String.fromCharCode(65+i)}</span><span>${o}</span></button>`).join('')}</div>${lesson.feedback?`<div class="feedback ${lesson.answered?'good':''}" role="status"><h3>${lesson.answered?'That’s it.':'A small nudge'}</h3><p>${lesson.feedback}</p></div>`:''}<div class="actions">${button('← Previous','lesson-prev','text-button',lesson.index?'':'disabled')}${button(lesson.index===cards.length-1?'Finish lesson ✓':'Next card →','lesson-next','primary',lesson.answered?'':'disabled')}</div><p class="pause-note">Answer to continue. Swipe left for the next card once your answer is correct.</p></div></article></div>`);bindSwipe()}
+function lessonAnswer(i){if(lesson.answered)return;stopSpeech();const c=lessons[screen.id][lesson.index];if(i===c.answer){lesson.answered=true;lesson.feedback=c.example;if(!stat(screen.id).lessons.includes(lesson.index))stat(screen.id).lessons.push(lesson.index);save();speak('Correct. '+c.example)}else{lesson.failed=true;lesson.feedback=c.hint;speak('Not quite. '+c.hint)}render()}
+function lessonNext(){if(!lesson.answered)return;if(lesson.index+1===lessons[screen.id].length){const id=screen.id;celebrate();if(session?.review){returnToSession();toast('Lesson complete. Your question is ready.')}else{navigate('topic',id);toast('All four lesson cards completed. Ready for practice?')}}else startLesson(screen.id,lesson.index+1)}
+function bindSwipe(){let x,y;const el=$('#lesson-card');el?.addEventListener('touchstart',e=>{x=e.changedTouches[0].clientX;y=e.changedTouches[0].clientY},{passive:true});el?.addEventListener('touchend',e=>{const dx=e.changedTouches[0].clientX-x,dy=e.changedTouches[0].clientY-y;if(Math.abs(dx)<70||Math.abs(dy)>60)return;if(dx<0)lessonNext();else if(lesson.index)startLesson(screen.id,lesson.index-1)},{passive:true})}
+function startSession(id,mode='practice',count=10,skill=null){cleanup();screen={name:'quiz',id};session={id,mode,total:count,baseIndex:0,bonus:0,attempted:0,correct:0,coreCorrect:0,queue:[],reinforced:new Set(),skill,order:mode==='mixed'?shuffle(Array.from({length:count},(_,i)=>topics[i%7].id)):[],rows:[],answers:{},selected:null,step:0,missed:new Map()};nextQuestion()}
+function nextQuestion(){cleanup();if(!session)return;if(!session.queue.length&&session.baseIndex>=session.total){finish();return}const queued=session.queue.shift();const id=queued?.topic||(session.mode==='mixed'?session.order[session.baseIndex]:session.id);session.bonusQuestion=!!queued;if(queued)session.bonus++;else session.baseIndex++;session.current=queued||generate(id,level(id),session.skill);session.attempts=0;session.locked=false;session.feedback='';session.success=false;session.hintCount=0;session.assisted=false;session.step=0;session.numeric='';session.answers={};session.effect='';session.rows=[{account:'',side:'Debit',amount:''},{account:'',side:'Credit',amount:''}];session.selected=null;session.drop=[];session.started=performance.now();screen.name='quiz';render();window.scrollTo({top:0,behavior:'instant'});startHints();if(session.mode==='rapid')startRapidClock()}
+function startHints(){clearInterval(hintTimer);if(session.mode==='rapid')return;let elapsed=0,last=performance.now();const id=session.current.id;hintTimer=setInterval(()=>{const now=performance.now();if(!document.hidden)elapsed+=now-last;last=now;if(!session||session.current.id!==id||session.locked){clearInterval(hintTimer);return}if(elapsed>=10000&&session.hintCount===0)hint(false);if(elapsed>=23000&&session.hintCount===1)hint(false)},300)}
+function formula(q){if(!q.formula)return '';return `<div class="formula"><div class="eyebrow">YOUR EQUATION GUIDE</div><div>${esc(q.formula)}</div>${q.values?`<div class="values">${q.labels.map((l,i)=>`<div class="value ${q.missing===i?'missing':''}"><small>${esc(l)}</small><strong>${q.missing===i?'?':cash(q.values[i])}</strong></div>`).join('')}</div>`:''}</div>`}
+function choiceControls(q){return `<div class="choices ${session.mode==='rapid'?'rapid-choices':''}">${q.options.map((o,i)=>`<button class="choice ${session.success&&String(o)===String(q.answer)?'correct':''}" data-action="answer-choice" data-index="${i}" ${session.locked?'disabled':''}>${session.mode==='rapid'?'':`<span class="letter">${String.fromCharCode(65+i)}</span>`}<span>${esc(o)}</span></button>`).join('')}</div>`}
+function journalControls(q){if(q.type==='drag')return `<p class="part-label">Drag an account to a side, or select it and tap “Place selected”.</p><div class="chips">${q.accountOptions.map(a=>`<button draggable="true" class="chip ${session.selected===a?'selected':''}" data-account="${esc(a)}" data-action="select-chip" ${session.locked?'disabled':''}>${esc(a)}</button>`).join('')}</div><div class="drop-grid">${['Debit','Credit'].map(side=>`<section class="dropzone" data-side="${side}"><h3>${side}</h3>${button('＋ Place selected','drop','drop-button',`data-side="${side}" ${session.locked?'disabled':''}`)}${session.drop.filter(e=>e.side===side).map(e=>`<div class="drop-item">${button('×','remove-drop','',`data-account="${esc(e.account)}" aria-label="Remove ${esc(e.account)}" ${session.locked?'disabled':''}`)}${esc(e.account)}<input aria-label="${esc(e.account)} ${side} amount" data-drop-account="${esc(e.account)}" inputmode="decimal" type="text" placeholder="Amount" value="${esc(e.amount)}" ${session.locked?'disabled':''}></div>`).join('')}</section>`).join('')}</div>${totals(session.drop)}`;
+ return `<div class="journal-head"><span>Account</span><span>Side</span><span>Amount</span><span></span></div>${session.rows.map((r,i)=>`<div class="journal-row"><select aria-label="Account for row ${i+1}" data-row="${i}" data-field="account" ${session.locked?'disabled':''}><option value="">Choose account</option>${q.accountOptions.map(a=>`<option ${r.account===a?'selected':''}>${esc(a)}</option>`).join('')}</select><select aria-label="Side for row ${i+1}" data-row="${i}" data-field="side" ${session.locked?'disabled':''}>${['Debit','Credit'].map(s=>`<option ${r.side===s?'selected':''}>${s}</option>`).join('')}</select><input aria-label="Amount for row ${i+1}" data-row="${i}" data-field="amount" inputmode="decimal" value="${esc(r.amount)}" placeholder="Amount" ${session.locked?'disabled':''}>${button('×','remove-row','',`data-index="${i}" aria-label="Remove row ${i+1}" ${session.locked?'disabled':''}`)}</div>`).join('')}${button('＋ Add row','add-row','text-button',session.locked?'disabled':'')}${totals(session.rows)}`}
+function totals(rows){const d=rows.filter(r=>r.side==='Debit').reduce((n,r)=>n+(parseAmount(r.amount)||0),0),c=rows.filter(r=>r.side==='Credit').reduce((n,r)=>n+(parseAmount(r.amount)||0),0);return `<div class="balance-check" id="totals"><span>Debits: ${cash(d)}</span><span>Credits: ${cash(c)}</span><span>${d===c&&d>0?'✓ Balanced':`Difference: ${cash(d-c)}`}</span></div>`}
+const parseAmount=s=>{const str=String(s).replace(/[$,\s]/g,'').replace(/−/g,'-');return str===''?NaN:Number(str)};
+function quizPage(){const q=session.current,t=topic(q.topic);let controls='';if(q.type==='choice')controls=choiceControls(q);else if(q.type==='transaction')controls=`<p class="part-label">1. Choose each affected account and its direction.</p><div class="account-choices">${q.accountOptions.map(a=>`<label class="account-choice"><span>${esc(a)}</span><select aria-label="${esc(a)} change" data-move="${esc(a)}" ${session.locked?'disabled':''}>${[['','No change'],['increase','Increase ↑'],['decrease','Decrease ↓']].map(([v,l])=>`<option value="${v}" ${session.answers[a]===v?'selected':''}>${l}</option>`).join('')}</select></label>`).join('')}</div><p class="part-label">2. Choose the overall accounting-equation effect.</p><select class="select-full" id="effect" aria-label="Overall accounting equation effect" ${session.locked?'disabled':''}><option value="">Select the effect</option>${q.effectOptions.map(o=>`<option ${session.effect===o?'selected':''}>${esc(o)}</option>`).join('')}</select>`;
+ else if(q.type==='journal'||q.type==='drag')controls=journalControls(q);
+ else controls=`${q.type==='guided'&&q.guided?`<div class="guided-steps">${q.steps.map((s,i)=>`<span class="step ${i===session.step?'active':i<session.step?'done':''}">${i<session.step?'✓':i+1}. ${s.label}</span>`).join('')}</div><div class="formula">${esc(q.steps[session.step].formula)}</div>`:''}<label class="answer-label" for="answer">${q.type==='guided'&&q.guided?q.steps[session.step].label:'Your answer'} · use a minus sign for a loss</label><input id="answer" class="number-input" type="text" inputmode="decimal" autocomplete="off" value="${esc(session.numeric||'')}" placeholder="Enter amount" aria-label="Your answer" ${session.locked?'disabled':''}>`;
+ layout(`<div class="practice-wrap"><div class="session-top">${button('×','back','back',`aria-label="End session" ${session.id?`data-id="${session.id}"`:''}`)}${bar(session.baseIndex/session.total*100,t.color)}<small>${session.baseIndex} / ${session.total}${session.bonus?` + ${session.bonus} bonus`:''}</small></div><section class="quiz" style="--color:${t.color}"><div class="question-meta"><span class="eyebrow">${t.name} · ${session.mode==='rapid'?'RAPID FIRE':session.mode.toUpperCase()}</span><span class="tag ${session.bonusQuestion?'bonus':''}">${session.bonusQuestion?'↻ Targeted bonus':`LEVEL ${level(t.id)}`}</span></div>${session.mode==='rapid'?'<div class="timer"><span id="timebar" style="width:100%"></span></div><p id="seconds" class="muted" style="text-align:center">10 seconds</p>':''}<h2 class="${session.mode==='rapid'?'rapid-prompt':''}">${esc(q.prompt)}</h2>${formula(q)}${controls}<div id="feedback-area">${feedbackHtml()}</div><div class="actions">${button('♫ Verbal hint','hint','text-button',session.locked?'disabled':'')}${button('Review topic','review','text-button')}${session.locked?button('Continue →','next'):q.type!=='choice'?button(q.type==='guided'&&q.guided&&session.step<q.steps.length-1?'Check step →':'Check answer','submit'):''}</div>${session.mode!=='rapid'?`<p class="coach-line"><i></i> ${state.voice?'Spoken coach':'Text coach'} · a gentle hint after 10 seconds.</p>`:''}</section></div>`);bindDrag()}
+function feedbackHtml(){if(!session.feedback)return '';return `<div class="feedback ${session.success?'good':''}" role="status"><h3>${session.success?session.attempts?'You worked through it.':'Nice work.':session.locked?'Time’s up. Let’s learn it.':session.attempts?'Try that again.':'A small nudge'}</h3><p>${esc(session.feedback)}</p>${(session.attempts>=2||session.locked)&&session.current.visual?visual(session.current.visual,session.current):''}</div>`}
+function refreshFeedback(){const area=$('#feedback-area');if(area)area.innerHTML=feedbackHtml()}
+function hint(manual=true){if(!session||session.locked)return;session.assisted=true;session.hintCount++;const q=session.current;session.feedback=session.hintCount===1?q.hint:q.strong;refreshFeedback();if(manual&&!state.voice){state.voice=true;save();const v=$('.voice');v.textContent='♫ Voice on';v.classList.add('on');v.setAttribute('aria-pressed','true');v.setAttribute('aria-label','Turn voice off')}speak(session.feedback)}
+function enqueue(q){const key=q.id;if(session.reinforced.has(key))return;session.reinforced.add(key);const a=fresh(q.topic,level(q.topic),q.skill,q.prompt),b=fresh(q.topic,level(q.topic),q.skill,a.prompt);session.queue.unshift(a,b)}
+function record(q,ok){const s=stat(q.topic),sk=skillState(q.topic,q.skill);state.questions++;s.answered++;sk.answered++;session.attempted++;if(ok){state.correct++;s.correct++;sk.correct++;session.correct++;if(!session.bonusQuestion)session.coreCorrect++;state.streak++;state.best=Math.max(state.best,state.streak);if(!session.assisted){sk.clean++;if(sk.open&&sk.clean>=2){sk.open=false;state.mistakesMastered++;toast('Skill mastered: '+q.label)}}else sk.clean=0}else{state.streak=0;sk.clean=0;sk.misses++;sk.open=true;session.missed.set(q.topic+':'+q.skill,{topic:q.topic,skill:q.skill,label:q.label});enqueue(q)}const m=mastery(q.topic);if(m>=85&&!s.mastered){s.mastered=true;celebrate();toast('Topic Mastered: '+topic(q.topic).name)}save()}
+function check(answer){if(!session||session.locked)return;const q=session.current;stopSpeech();if(q.type==='guided'&&q.guided){const good=Number(answer)===q.steps[session.step].answer&&Number.isFinite(Number(answer));if(good&&session.step<q.steps.length-1){session.step++;session.numeric='';session.feedback='Step complete. Carry that value into the next equation.';render();speak('Correct step. '+q.steps[session.step].label);return}if(!good){miss();return}}
+ const ok=q.type==='guided'&&q.guided?true:grade(q,answer);if(!ok){miss();return}if(session.attempts===0)record(q,true);session.success=true;session.locked=true;session.feedback=q.why+(session.attempts?' Two new questions on this same skill come next.':'');clearInterval(hintTimer);clearInterval(rapidTimer);render();speak('Correct. '+q.why)}
+function miss(){if(session.attempts===0)record(session.current,false);session.attempts++;session.assisted=true;session.feedback=session.attempts===1?session.current.hint:session.current.why;session.success=false;refreshFeedback();speak(session.attempts===1?'Not quite. '+session.feedback:'Let’s break it down. '+session.feedback);if(session.mode==='rapid'){session.locked=true;clearInterval(rapidTimer);render()}}
+function submit(){if(session.locked)return;const q=session.current;if(q.type==='transaction'){if(!session.effect||!Object.values(session.answers).some(Boolean)){toast('Choose the account changes and overall effect.');return}check({moves:session.answers,effect:session.effect})}else if(q.type==='journal'||q.type==='drag'){const rows=(q.type==='drag'?session.drop:session.rows).filter(r=>r.account||r.amount);if(!rows.length||rows.some(r=>!r.account||!Number.isFinite(parseAmount(r.amount))||parseAmount(r.amount)<=0)){toast('Choose each account and enter a positive amount.');return}check(rows.map(r=>({...r,amount:parseAmount(r.amount)})))}else{const n=parseAmount($('#answer').value);if(!Number.isFinite(n)){toast('Enter a number first. Use a minus sign for a loss.');return}check(n)}}
+function finish(){cleanup();screen.name='result';render();if(session.coreCorrect/session.total>=.8)celebrate()}
+function resultPage(){const score=pct(session.coreCorrect,session.total);layout(`<div class="result"><div class="result-icon">${score>=80?'✦':'↗'}</div><p class="eyebrow">${session.mode==='challenge'?'CHALLENGE COMPLETE':'SESSION COMPLETE'}</p><h1>${score>=80?'Look at you go.':'Every attempt counts.'}</h1><div class="score">${score}%</div><p>${session.coreCorrect} of ${session.total} core questions correct on the first try.</p>${session.bonus?`<p>${session.bonus} targeted bonus questions completed.</p>`:''}<p>${session.missed.size?'Keep the difficult skills fresh with another short practice.':'You’ve built another layer of confidence.'}</p><div class="actions">${button('Practice again','again')}${button('View progress','nav','secondary','data-id="progress"')}</div>${session.missed.size?`<div class="result-skills"><h3>Your review list</h3>${[...session.missed.values()].map(m=>button(esc(m.label),'skill','secondary',`data-id="${m.topic}" data-skill="${esc(m.skill)}"`)).join('')}</div>`:''}</div>`)}
+function startRapidClock(){let elapsed=0,last=performance.now();rapidTimer=setInterval(()=>{if(!session||session.locked)return;const now=performance.now();if(!document.hidden)elapsed+=now-last;last=now;const left=Math.max(0,10000-elapsed);if($('#timebar'))$('#timebar').style.width=left/100+'%';if($('#seconds'))$('#seconds').textContent=Math.ceil(left/1000)+' seconds';if(!left){clearInterval(rapidTimer);if(!session.attempts)record(session.current,false);session.attempts++;session.locked=true;session.feedback=session.current.why;render();speak('Time’s up. '+session.current.why)}},100)}
+function bindDrag(){document.querySelectorAll('[draggable]').forEach(el=>el.addEventListener('dragstart',e=>{if(session.locked){e.preventDefault();return}dragAccount=el.dataset.account;e.dataTransfer.setData('text/plain',dragAccount);e.dataTransfer.effectAllowed='move'}));document.querySelectorAll('.dropzone').forEach(el=>{el.addEventListener('dragover',e=>e.preventDefault());el.addEventListener('drop',e=>{e.preventDefault();placeAccount(e.dataTransfer.getData('text/plain'),el.dataset.side)})})}
+function placeAccount(account,side){if(session.locked)return;if(!account){toast('Select an account first.');return}if(!session.current.accountOptions.includes(account))return;session.drop=session.drop.filter(e=>e.account!==account);session.drop.push({account,side,amount:''});session.selected=null;render()}
+function returnToSession(){cleanup();screen=session.review.screen;lesson=session.review.lesson;delete session.review;render();if(!session.locked){startHints();if(session.mode==='rapid')startRapidClock()}}
+app.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b||b.disabled)return;const a=b.dataset.action,id=b.dataset.id;
+ if(a==='nav')navigate(id);else if(a==='topic')navigate('topic',id);else if(a==='back')navigate(id?'topic':'home',id);
+ else if(a==='voice'){state.voice=!state.voice;save();stopSpeech();b.textContent=state.voice?'♫ Voice on':'♫ Voice off';b.classList.toggle('on',state.voice);b.setAttribute('aria-pressed',state.voice);b.setAttribute('aria-label',state.voice?'Turn voice off':'Turn voice on');if(screen.name==='lesson'&&state.voice)narrate()}
+ else if(a==='learn')startLesson(id);else if(a==='narrate')narrate();else if(a==='lesson-answer')lessonAnswer(Number(b.dataset.index));else if(a==='lesson-next')lessonNext();else if(a==='lesson-prev'&&lesson.index)startLesson(screen.id,lesson.index-1);
+ else if(a==='practice'||a==='challenge')startSession(id,a);else if(a==='mistakes')navigate('mistakes',id);else if(a==='skill')startSession(id,'mistakes',6,b.dataset.skill);
+ else if(a==='start-mixed')startSession(null,'mixed',Number(b.dataset.count));else if(a==='rapid')startSession('debits','rapid');
+ else if(a==='answer-choice')check(session.current.options[Number(b.dataset.index)]);else if(a==='submit')submit();else if(a==='hint')hint();else if(a==='next')nextQuestion();else if(a==='review'){const current=topic(session.current.topic);cleanup();session.review={screen:{...screen},lesson};screen={name:'lesson',id:current.id};lesson={index:0,answered:false,feedback:''};render();toast('Use × to return to your question.');narrate()}
+ else if(a==='return-session')returnToSession();
+ else if(a==='add-row'&&!session.locked){if(session.rows.length<6){session.rows.push({account:'',side:'Debit',amount:''});render()}}else if(a==='remove-row'&&!session.locked){if(session.rows.length>1){session.rows.splice(Number(b.dataset.index),1);render()}}
+ else if(a==='select-chip'&&!session.locked){session.selected=b.dataset.account;render()}else if(a==='drop')placeAccount(session.selected,b.dataset.side);else if(a==='remove-drop'&&!session.locked){session.drop=session.drop.filter(r=>r.account!==b.dataset.account);render()}
+ else if(a==='again')startSession(session.id,session.mode,session.total,session.skill);else if(a==='install'&&installPrompt){installPrompt.prompt();installPrompt=null}
+});
+app.addEventListener('change',e=>{const el=e.target;if(!session||session.locked)return;if(el.dataset.move)session.answers[el.dataset.move]=el.value;if(el.id==='effect')session.effect=el.value;if(el.dataset.row!==undefined){session.rows[Number(el.dataset.row)][el.dataset.field]=el.value;const totalsEl=$('#totals');if(totalsEl)totalsEl.outerHTML=totals(session.rows)}});
+app.addEventListener('input',e=>{const el=e.target;if(!session||session.locked)return;if(el.id==='answer')session.numeric=el.value;if(el.dataset.row!==undefined){session.rows[Number(el.dataset.row)][el.dataset.field]=el.value;$('#totals').outerHTML=totals(session.rows)}if(el.dataset.dropAccount){session.drop.find(r=>r.account===el.dataset.dropAccount).amount=el.value;$('#totals').outerHTML=totals(session.drop)}});
+app.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.id==='answer'){e.preventDefault();submit()}});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stopSpeech()});
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e});
+window.addEventListener('hashchange',()=>{const [name,id]=location.hash.slice(1).split('/');if(['home','mixed','progress'].includes(name))navigate(name);else if(name==='topic'&&topic(id))navigate(name,id)});
+if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).then(reg=>{const announce=()=>{if(!reg.waiting)return;const banner=$('#update');banner.hidden=false;banner.innerHTML='A new version is ready. Finish your question, then refresh. <button id="apply-update">Update now</button>';$('#apply-update').onclick=()=>{reg.waiting.postMessage({type:'SKIP_WAITING'});navigator.serviceWorker.addEventListener('controllerchange',()=>location.reload(),{once:true})}};announce();reg.addEventListener('updatefound',()=>{const worker=reg.installing;worker?.addEventListener('statechange',()=>{if(worker.state==='installed'&&navigator.serviceWorker.controller)announce()})});reg.update().catch(()=>{})}).catch(()=>{})}
+const [initial,id]=location.hash.slice(1).split('/');if(['home','mixed','progress'].includes(initial))screen={name:initial};else if(initial==='topic'&&topic(id))screen={name:'topic',id};render();

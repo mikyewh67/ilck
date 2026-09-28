@@ -1,13 +1,1 @@
-{
-  "name": "Ledger Lab — Accounting Coach",
-  "short_name": "Ledger Lab",
-  "description": "Interactive Accounting 1 study coach for Chapters 1–2.",
-  "start_url": "./",
-  "display": "standalone",
-  "background_color": "#0a0b10",
-  "theme_color": "#0a0b10",
-  "icons": [
-    {"src":"icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
-    {"src":"icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
-  ]
-}
+{"id":"./","name":"Ledger Lab — Accounting 1","short_name":"Ledger Lab","description":"Visual lessons and adaptive Accounting 1 practice.","start_url":"./","scope":"./","display":"standalone","background_color":"#090c17","theme_color":"#090c17","icons":[{"src":"icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"}]}
