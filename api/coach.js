@@ -1,89 +1,72 @@
-const LEVELS = [
-  'Give only a very light nudge: identify what kind of accounting idea this question is testing.',
-  'Point out the most important keyword or timing clue in the question.',
-  'Remind the learner of the exact rule or equation they should use, without applying it for them.',
-  'Apply the rule to the first important account or number, but leave the rest for the learner.',
-  'Walk through the setup and eliminate the most tempting wrong path. Do not state the final answer.',
-  'Plug in the known values or identify the likely debit/credit sides. Leave at least two mental steps.',
-  'Do almost all of the reasoning and leave one meaningful final step. Do not state the option letter or exact numeric answer.',
-  'Make the answer extremely obvious by explaining the complete pattern, but still leave the learner to choose or calculate the final answer themselves.'
+const LEVELS=[
+ 'Give a tiny nudge. Name the exact accounting idea being tested and point to one clue from THIS question.',
+ 'Point to the exact word, timing clue, account name, or number in THIS question that should control the next step.',
+ 'State the exact rule, normal-balance rule, journal pattern, or equation needed for THIS question. Do not solve it yet.',
+ 'Apply that rule to the first specific account or number from THIS question. Leave the rest for the learner.',
+ 'Walk through the setup for THIS exact question and explain why one tempting path is wrong. Do not give the final choice or final number.',
+ 'Do most of the setup using the exact accounts/numbers shown. Leave two meaningful steps.',
+ 'Do nearly all of the reasoning for THIS question. Leave one meaningful final step and do not say the answer choice letter.',
+ 'Explain the full pattern using the exact question details so the learner can make the final choice or calculation. Do not directly state the final answer.'
 ];
 
-function outputText(data){
-  if(typeof data?.output_text==='string' && data.output_text.trim()) return data.output_text.trim();
-  const parts=[];
-  for(const item of data?.output||[]){
-    for(const content of item?.content||[]){
-      if(content?.type==='output_text' && content?.text) parts.push(content.text);
-      else if(typeof content?.text==='string') parts.push(content.text);
-    }
-  }
-  return parts.join(' ').trim();
+function clip(value,max=6000){
+ try{return JSON.stringify(value).slice(0,max)}catch{return String(value||'').slice(0,max)}
 }
 
 export default async function handler(req,res){
-  res.setHeader('Cache-Control','no-store');
-  if(req.method!=='POST') return res.status(405).json({error:'method_not_allowed'});
-  const key=process.env.OPENAI_API_KEY;
-  if(!key) return res.status(503).json({error:'coach_not_configured'});
+ res.setHeader('Cache-Control','no-store');
+ if(req.method!=='POST')return res.status(405).json({error:'method_not_allowed'});
+ const key=process.env.OPENAI_API_KEY;
+ if(!key)return res.status(503).json({error:'coach_not_configured'});
+ const body=req.body||{};
+ const level=Math.max(1,Math.min(8,Number(body.level)||1));
+ const snapshot=body.snapshot&&typeof body.snapshot==='object'?body.snapshot:{};
+ if(!snapshot.prompt)return res.status(400).json({error:'missing_question'});
 
-  const body=req.body||{};
-  const level=Math.max(1,Math.min(8,Number(body.level)||1));
-  const question=String(body.question||'').slice(0,1800);
-  if(!question) return res.status(400).json({error:'missing_question'});
+ const system=[
+  'You are Ledger Coach, a highly attentive one-on-one Accounting 1 tutor speaking directly to one student.',
+  'You must respond ONLY to the exact current question in the provided QUESTION SNAPSHOT. Never drift to a generic accounting example or a different question.',
+  'Before answering, silently verify the correct reasoning from the snapshot, including the private correct answer, entries, moves, equation values, effect, or steps when present.',
+  'Anchor every hint to at least one exact detail from the current question: a company name, account, wording clue, dollar amount, equation label, or answer option.',
+  'If LAST STUDENT ANSWER is present, address why that exact attempt is or is not on the right track.',
+  'Never mention that you can see a private answer key. Never say an option letter. Do not directly reveal the final numeric answer or final choice.',
+  'Keep the hint short: usually 2 to 4 natural sentences, under 90 words.',
+  'Sound like a real young tutor sitting next to the student: casual, patient, sharp, and specific. Avoid textbook language, canned phrases, and robotic repetition.',
+  'You are speaking out loud, so write for speech: short sentences, natural contractions, and clear pauses.'
+ ].join(' ');
 
-  const options=Array.isArray(body.options)?body.options.slice(0,8):[];
-  const privateAnswer=JSON.stringify(body.answer??'').slice(0,1000);
-  const why=String(body.explanation||'').slice(0,1200);
-  const formula=String(body.formula||'').slice(0,600);
-  const topic=String(body.topic||'Accounting 1').slice(0,120);
-  const skill=String(body.skill||'').slice(0,120);
-  const attempts=Math.max(0,Math.min(6,Number(body.attempts)||0));
+ const user=[
+  'QUESTION SNAPSHOT:',clip(snapshot,9000),
+  'WRONG ATTEMPTS SO FAR: '+Math.max(0,Number(body.attempts)||0),
+  'HINT LEVEL: '+level+'/8',
+  'HINT LEVEL INSTRUCTION: '+LEVELS[level-1],
+  'Give only the coaching hint for this exact question.'
+ ].join('\n');
 
-  const instructions='You are Ledger Coach, a warm, sharp Accounting 1 study partner. '+
-    'Help the learner reason through multiple-choice, equations, transaction analysis, debit/credit, financial statements, and journal entries without blurting out the answer. '+
-    'Sound conversational and confident, not robotic or textbook-like. Use plain English and short sentences. '+
-    'Never mention that you were given the correct answer privately. Never say the option letter. Never reveal the exact final numeric answer. '+
-    'Do not ask follow-up questions. Give one concise coaching hint, usually 1-3 sentences and under 70 words. '+
-    'If the learner has already missed the question, be more concrete. The hint system has 8 levels; follow the requested level exactly.';
-
-  const input=[
-    'Topic: '+topic,
-    'Skill: '+skill,
-    'Question type: '+String(body.type||'').slice(0,80),
-    'Question: '+question,
-    options.length?'Options: '+JSON.stringify(options):'',
-    formula?'Formula shown to learner: '+formula:'',
-    'Private correct answer: '+privateAnswer,
-    'Known explanation: '+why,
-    'Wrong attempts so far: '+attempts,
-    'Hint level: '+level+'/8',
-    'Level instruction: '+LEVELS[level-1]
-  ].filter(Boolean).join('\n');
-
-  try{
-    const response=await fetch('https://api.openai.com/v1/responses',{
-      method:'POST',
-      headers:{'Authorization':'Bearer '+key,'Content-Type':'application/json'},
-      body:JSON.stringify({
-        model:process.env.OPENAI_HINT_MODEL||'gpt-6-luna',
-        instructions,
-        input,
-        reasoning:{effort:'none'},
-        max_output_tokens:140,
-        store:false
-      })
-    });
-    const data=await response.json().catch(()=>({}));
-    if(!response.ok){
-      console.error('OpenAI hint error',response.status,data?.error?.message||'unknown');
-      return res.status(502).json({error:'coach_request_failed'});
-    }
-    const hint=outputText(data);
-    if(!hint) return res.status(502).json({error:'empty_coach_response'});
-    return res.status(200).json({hint,level});
-  }catch(err){
-    console.error('Coach endpoint error',err);
-    return res.status(502).json({error:'coach_unavailable'});
+ try{
+  const response=await fetch('https://api.openai.com/v1/chat/completions',{
+   method:'POST',
+   headers:{'Authorization':'Bearer '+key,'Content-Type':'application/json'},
+   body:JSON.stringify({
+    model:process.env.OPENAI_COACH_MODEL||'gpt-audio-1.5',
+    modalities:['text','audio'],
+    audio:{voice:process.env.OPENAI_COACH_VOICE||'alloy',format:'wav'},
+    messages:[{role:'system',content:system},{role:'user',content:user}],
+    store:false
+   })
+  });
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok){
+   console.error('OpenAI coach error',response.status,data?.error?.message||'unknown');
+   return res.status(502).json({error:'coach_request_failed'});
   }
+  const msg=data?.choices?.[0]?.message||{};
+  const audio=msg?.audio?.data||'';
+  const transcript=String(msg?.audio?.transcript||msg?.content||'').trim();
+  if(!transcript)return res.status(502).json({error:'empty_coach_response'});
+  return res.status(200).json({hint:transcript,level,audio,audioFormat:'wav'});
+ }catch(err){
+  console.error('Coach endpoint error',err);
+  return res.status(502).json({error:'coach_unavailable'});
+ }
 }
