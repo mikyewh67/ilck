@@ -31,8 +31,9 @@ export default async function handler(req,res){
   'If LAST STUDENT ANSWER is present, address why that exact attempt is or is not on the right track.',
   'Never mention that you can see a private answer key. Never say an option letter. Do not directly reveal the final numeric answer or final choice.',
   'Keep the hint short: usually 2 to 4 natural sentences, under 90 words.',
+  'If PREVIOUS HINTS appear in the snapshot, continue the same reasoning path instead of switching to a random new explanation. Each new hint should clearly deepen the last hint by one step.',
   'Sound like a real young tutor sitting next to the student: casual, patient, sharp, and specific. Avoid textbook language, canned phrases, and robotic repetition.',
-  'You are speaking out loud, so write for speech: short sentences, natural contractions, and clear pauses.'
+  'You are speaking out loud, so write for speech: short sentences, natural contractions, clear pauses, and a calm medium-slow tutoring pace.'
  ].join(' ');
 
  const user=[
