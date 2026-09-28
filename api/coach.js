@@ -9,6 +9,12 @@ const LEVELS=[
  'Explain the full pattern using the exact question details so the learner can make the final choice or calculation. Do not directly state the final answer.'
 ];
 
+function outputText(data){
+ if(typeof data?.output_text==='string'&&data.output_text.trim())return data.output_text.trim();
+ const out=[];for(const item of data?.output||[])for(const part of item?.content||[])if(part?.text)out.push(part.text);
+ return out.join(' ').trim();
+}
+
 function clip(value,max=6000){
  try{return JSON.stringify(value).slice(0,max)}catch{return String(value||'').slice(0,max)}
 }
@@ -57,15 +63,37 @@ export default async function handler(req,res){
    })
   });
   const data=await response.json().catch(()=>({}));
-  if(!response.ok){
-   console.error('OpenAI coach error',response.status,data?.error?.message||'unknown');
+  if(response.ok){
+   const msg=data?.choices?.[0]?.message||{};
+   const audio=msg?.audio?.data||'';
+   const transcript=String(msg?.audio?.transcript||msg?.content||'').trim();
+   if(transcript)return res.status(200).json({hint:transcript,level,audio,audioFormat:'wav'});
+  }else{
+   console.error('OpenAI audio coach error',response.status,data?.error?.message||'unknown');
+  }
+
+  // If native audio generation is unavailable, keep the hint intelligent and question-specific,
+  // then let the client speak it through the separate OpenAI TTS endpoint.
+  const textResponse=await fetch('https://api.openai.com/v1/responses',{
+   method:'POST',
+   headers:{'Authorization':'Bearer '+key,'Content-Type':'application/json'},
+   body:JSON.stringify({
+    model:process.env.OPENAI_HINT_MODEL||'gpt-6-luna',
+    instructions:system,
+    input:user,
+    reasoning:{effort:'none'},
+    max_output_tokens:180,
+    store:false
+   })
+  });
+  const textData=await textResponse.json().catch(()=>({}));
+  if(!textResponse.ok){
+   console.error('OpenAI text coach fallback error',textResponse.status,textData?.error?.message||'unknown');
    return res.status(502).json({error:'coach_request_failed'});
   }
-  const msg=data?.choices?.[0]?.message||{};
-  const audio=msg?.audio?.data||'';
-  const transcript=String(msg?.audio?.transcript||msg?.content||'').trim();
+  const transcript=outputText(textData);
   if(!transcript)return res.status(502).json({error:'empty_coach_response'});
-  return res.status(200).json({hint:transcript,level,audio,audioFormat:'wav'});
+  return res.status(200).json({hint:transcript,level,audio:'',audioFormat:null});
  }catch(err){
   console.error('Coach endpoint error',err);
   return res.status(502).json({error:'coach_unavailable'});
