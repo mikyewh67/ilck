@@ -1,10 +1,10 @@
-import {topics,accounts,skillsFor,generate,fresh,grade,shuffle,cash,pick} from './engine.js?v=2';
-import {lessons} from './lessons.js?v=2';
+import {topics,accounts,skillsFor,generate,fresh,grade,shuffle,cash,pick} from './engine.js?v=3';
+import {lessons} from './lessons.js?v=3';
 const KEY='ledger-lab-v2', $=s=>document.querySelector(s), esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const emptyTopic=()=>({answered:0,correct:0,skills:{},lessons:[],mastered:false});
 const defaults=()=>({voice:true,questions:0,correct:0,streak:0,best:0,mistakesMastered:0,topics:Object.fromEntries(topics.map(t=>[t.id,emptyTopic()]))});
 let state;try{state={...defaults(),...JSON.parse(localStorage.getItem(KEY)||'{}')};for(const t of topics)state.topics[t.id]={...emptyTopic(),...state.topics[t.id]}}catch{state=defaults()}
-let storageFailed=false, screen={name:'home'}, session=null, lesson=null, hintTimer,rapidTimer,toastTimer, speechToken=0,dragAccount=null, installPrompt;
+let storageFailed=false, screen={name:'home'}, session=null, lesson=null, hintTimer,rapidTimer,toastTimer, speechToken=0,dragAccount=null, installPrompt, hintAbort=null, speechAbort=null, coachCtx=null, coachSource=null;
 const app=$('#app');
 function save(){try{localStorage.setItem(KEY,JSON.stringify(state))}catch{storageFailed=true;toast('Your browser could not save progress. Keep this tab open.')}}
 const topic=id=>topics.find(t=>t.id===id), stat=id=>state.topics[id], pct=(a,b)=>b?Math.round(a/b*100):0;
@@ -18,9 +18,53 @@ const weakest=()=>topics.flatMap(t=>Object.entries(stat(t.id).skills).map(([id,s
 const nextTopic=()=>[...topics].sort((a,b)=>mastery(a.id)-mastery(b.id))[0];
 const button=(text,action,cls='primary',data='')=>`<button class="${cls}" data-action="${action}" ${data}>${text}</button>`;
 function toast(text){clearTimeout(toastTimer);$('#toast').textContent=text;$('#toast').classList.add('show');toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),4000)}
-function stopSpeech(){speechToken++;if('speechSynthesis' in window)speechSynthesis.cancel()}
-function speak(text){stopSpeech();if(!state.voice||!('speechSynthesis' in window)||document.hidden)return;const token=speechToken;const chunks=text.replace(/↑/g,' increases ').replace(/↓/g,' decreases ').replace(/\$/g,' dollars ').split(/(?<=[.!?])\s+/);function next(){if(token!==speechToken||!chunks.length)return;const u=new SpeechSynthesisUtterance(chunks.shift());u.lang='en-US';u.rate=.94;const voice=speechSynthesis.getVoices().find(v=>v.lang==='en-US'&&/Samantha|Aria|Google US|Microsoft Jenny/.test(v.name));if(voice)u.voice=voice;u.onend=next;u.onerror=()=>{};speechSynthesis.speak(u)}next()}
-function cleanup(){clearInterval(hintTimer);clearInterval(rapidTimer);stopSpeech()}
+function unlockCoachAudio(){
+  try{
+    const AC=window.AudioContext||window.webkitAudioContext;
+    if(!AC)return;
+    if(!coachCtx)coachCtx=new AC();
+    if(coachCtx.state==='suspended')coachCtx.resume().catch(()=>{});
+  }catch{}
+}
+document.addEventListener('pointerdown',unlockCoachAudio,{passive:true});
+function fallbackSpeak(text){
+  if(!('speechSynthesis' in window)||document.hidden)return;
+  try{
+    speechSynthesis.cancel();
+    const chunks=String(text).replace(/↑/g,' increases ').replace(/↓/g,' decreases ').replace(/\$/g,' dollars ').split(/(?<=[.!?])\s+/);
+    const next=()=>{
+      if(!chunks.length)return;
+      const u=new SpeechSynthesisUtterance(chunks.shift());u.lang='en-US';u.rate=.94;
+      const voice=speechSynthesis.getVoices().find(v=>v.lang==='en-US'&&/Samantha|Aria|Google US|Microsoft Jenny/.test(v.name));
+      if(voice)u.voice=voice;u.onend=next;u.onerror=()=>{};speechSynthesis.speak(u);
+    };
+    next();
+  }catch{}
+}
+function stopSpeech(){
+  speechToken++;
+  if(speechAbort){speechAbort.abort();speechAbort=null}
+  if(coachSource){try{coachSource.stop()}catch{}coachSource=null}
+  if('speechSynthesis' in window)speechSynthesis.cancel();
+}
+async function speak(text){
+  if(!state.voice||document.hidden||!text)return;
+  stopSpeech();unlockCoachAudio();const token=speechToken;
+  speechAbort=new AbortController();
+  try{
+    const response=await fetch('/api/speak',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:String(text).slice(0,1400)}),signal:speechAbort.signal});
+    if(!response.ok)throw new Error('voice '+response.status);
+    const bytes=await response.arrayBuffer();
+    if(token!==speechToken)return;
+    if(!coachCtx){fallbackSpeak(text);return}
+    const audio=await coachCtx.decodeAudioData(bytes.slice(0));
+    if(token!==speechToken)return;
+    coachSource=coachCtx.createBufferSource();coachSource.buffer=audio;coachSource.connect(coachCtx.destination);coachSource.onended=()=>{if(token===speechToken)coachSource=null};coachSource.start();
+  }catch(err){
+    if(err?.name!=='AbortError'&&token===speechToken)fallbackSpeak(text);
+  }
+}
+function cleanup(){clearInterval(hintTimer);clearInterval(rapidTimer);if(hintAbort){hintAbort.abort();hintAbort=null}stopSpeech()}
 function celebrate(){if(matchMedia('(prefers-reduced-motion: reduce)').matches)return;const box=document.createElement('div');box.className='confetti';box.innerHTML=Array.from({length:40},()=>`<i style="left:${Math.random()*100}%;--color:${pick(['#c4ec75','#a998ff','#61dbe8','#ffbc78'])};animation-delay:${Math.random()*.3}s"></i>`).join('');document.body.append(box);setTimeout(()=>box.remove(),2200)}
 function navigate(name,id){cleanup();screen={name,id};session=null;lesson=null;history.replaceState(null,'',name==='home'?'#home':`#${name}${id?'/'+id:''}`);render();window.scrollTo({top:0,behavior:'instant'})}
 function nav(){if(['quiz','lesson'].includes(screen.name))return '';const active=screen.name==='progress'?'progress':screen.name==='mixed'||session?.mode==='mixed'?'mixed':'home';return `<nav class="nav" aria-label="Main navigation">${[['home','⌂','Home'],['mixed','✦','Mixed Test'],['progress','▥','Progress']].map(([id,icon,label])=>`<button data-action="nav" data-id="${id}" class="${active===id?'active':''}" ${active===id?'aria-current="page"':''}><span class="nav-icon" aria-hidden="true">${icon}</span>${label}</button>`).join('')}</nav>`}
@@ -69,8 +113,8 @@ function lessonAnswer(i){if(lesson.answered)return;stopSpeech();const c=lessons[
 function lessonNext(){if(!lesson.answered)return;if(lesson.index+1===lessons[screen.id].length){const id=screen.id;celebrate();if(session?.review){returnToSession();toast('Lesson complete. Your question is ready.')}else{navigate('topic',id);toast('All four lesson cards completed. Ready for practice?')}}else startLesson(screen.id,lesson.index+1)}
 function bindSwipe(){let x,y;const el=$('#lesson-card');el?.addEventListener('touchstart',e=>{x=e.changedTouches[0].clientX;y=e.changedTouches[0].clientY},{passive:true});el?.addEventListener('touchend',e=>{const dx=e.changedTouches[0].clientX-x,dy=e.changedTouches[0].clientY-y;if(Math.abs(dx)<70||Math.abs(dy)>60)return;if(dx<0)lessonNext();else if(lesson.index)startLesson(screen.id,lesson.index-1)},{passive:true})}
 function startSession(id,mode='practice',count=10,skill=null){cleanup();screen={name:'quiz',id};session={id,mode,total:count,baseIndex:0,bonus:0,attempted:0,correct:0,coreCorrect:0,queue:[],reinforced:new Set(),skill,order:mode==='mixed'?shuffle(Array.from({length:count},(_,i)=>topics[i%7].id)):[],rows:[],answers:{},selected:null,step:0,missed:new Map()};nextQuestion()}
-function nextQuestion(){cleanup();if(!session)return;if(!session.queue.length&&session.baseIndex>=session.total){finish();return}const queued=session.queue.shift();const id=queued?.topic||(session.mode==='mixed'?session.order[session.baseIndex]:session.id);session.bonusQuestion=!!queued;if(queued)session.bonus++;else session.baseIndex++;session.current=queued||generate(id,level(id),session.skill);session.attempts=0;session.locked=false;session.feedback='';session.success=false;session.hintCount=0;session.assisted=false;session.step=0;session.numeric='';session.answers={};session.effect='';session.rows=[{account:'',side:'Debit',amount:''},{account:'',side:'Credit',amount:''}];session.selected=null;session.drop=[];session.started=performance.now();screen.name='quiz';render();window.scrollTo({top:0,behavior:'instant'});startHints();if(session.mode==='rapid')startRapidClock()}
-function startHints(){clearInterval(hintTimer);if(session.mode==='rapid')return;let elapsed=0,last=performance.now();const id=session.current.id;hintTimer=setInterval(()=>{const now=performance.now();if(!document.hidden)elapsed+=now-last;last=now;if(!session||session.current.id!==id||session.locked){clearInterval(hintTimer);return}if(elapsed>=10000&&session.hintCount===0)hint(false);if(elapsed>=23000&&session.hintCount===1)hint(false)},300)}
+function nextQuestion(){cleanup();if(!session)return;if(!session.queue.length&&session.baseIndex>=session.total){finish();return}const queued=session.queue.shift();const id=queued?.topic||(session.mode==='mixed'?session.order[session.baseIndex]:session.id);session.bonusQuestion=!!queued;if(queued)session.bonus++;else session.baseIndex++;session.current=queued||generate(id,level(id),session.skill);session.attempts=0;session.locked=false;session.feedback='';session.success=false;session.hintCount=0;session.assisted=false;session.step=0;session.numeric='';session.answers={};session.effect='';session.rows=[{account:'',side:'Debit',amount:''},{account:'',side:'Credit',amount:''}];session.selected=null;session.drop=[];session.started=performance.now();session.hintLastAt=performance.now();session.hintBusy=false;screen.name='quiz';render();window.scrollTo({top:0,behavior:'instant'});startHints();if(session.mode==='rapid')startRapidClock()}
+function startHints(){clearInterval(hintTimer);if(session.mode==='rapid')return;const id=session.current.id;hintTimer=setInterval(()=>{if(!session||session.current.id!==id||session.locked){clearInterval(hintTimer);return}if(document.hidden||session.hintBusy)return;if(session.hintCount>=8){clearInterval(hintTimer);return}if(performance.now()-session.hintLastAt>=10000){session.hintLastAt=performance.now();hint(false)}},350)}
 function formula(q){if(!q.formula)return '';return `<div class="formula"><div class="eyebrow">YOUR EQUATION GUIDE</div><div>${esc(q.formula)}</div>${q.values?`<div class="values">${q.labels.map((l,i)=>`<div class="value ${q.missing===i?'missing':''}"><small>${esc(l)}</small><strong>${q.missing===i?'?':cash(q.values[i])}</strong></div>`).join('')}</div>`:''}</div>`}
 function choiceControls(q){return `<div class="choices ${session.mode==='rapid'?'rapid-choices':''}">${q.options.map((o,i)=>`<button class="choice ${session.success&&String(o)===String(q.answer)?'correct':''}" data-action="answer-choice" data-index="${i}" ${session.locked?'disabled':''}>${session.mode==='rapid'?'':`<span class="letter">${String.fromCharCode(65+i)}</span>`}<span>${esc(o)}</span></button>`).join('')}</div>`}
 function journalControls(q){if(q.type==='drag')return `<p class="part-label">Drag an account to a side, or select it and tap “Place selected”.</p><div class="chips">${q.accountOptions.map(a=>`<button draggable="true" class="chip ${session.selected===a?'selected':''}" data-account="${esc(a)}" data-action="select-chip" ${session.locked?'disabled':''}>${esc(a)}</button>`).join('')}</div><div class="drop-grid">${['Debit','Credit'].map(side=>`<section class="dropzone" data-side="${side}"><h3>${side}</h3>${button('＋ Place selected','drop','drop-button',`data-side="${side}" ${session.locked?'disabled':''}`)}${session.drop.filter(e=>e.side===side).map(e=>`<div class="drop-item">${button('×','remove-drop','',`data-account="${esc(e.account)}" aria-label="Remove ${esc(e.account)}" ${session.locked?'disabled':''}`)}${esc(e.account)}<input aria-label="${esc(e.account)} ${side} amount" data-drop-account="${esc(e.account)}" inputmode="decimal" type="text" placeholder="Amount" value="${esc(e.amount)}" ${session.locked?'disabled':''}></div>`).join('')}</section>`).join('')}</div>${totals(session.drop)}`;
@@ -80,10 +124,29 @@ const parseAmount=s=>{const str=String(s).replace(/[$,\s]/g,'').replace(/−/g,'
 function quizPage(){const q=session.current,t=topic(q.topic);let controls='';if(q.type==='choice')controls=choiceControls(q);else if(q.type==='transaction')controls=`<p class="part-label">1. Choose each affected account and its direction.</p><div class="account-choices">${q.accountOptions.map(a=>`<label class="account-choice"><span>${esc(a)}</span><select aria-label="${esc(a)} change" data-move="${esc(a)}" ${session.locked?'disabled':''}>${[['','No change'],['increase','Increase ↑'],['decrease','Decrease ↓']].map(([v,l])=>`<option value="${v}" ${session.answers[a]===v?'selected':''}>${l}</option>`).join('')}</select></label>`).join('')}</div><p class="part-label">2. Choose the overall accounting-equation effect.</p><select class="select-full" id="effect" aria-label="Overall accounting equation effect" ${session.locked?'disabled':''}><option value="">Select the effect</option>${q.effectOptions.map(o=>`<option ${session.effect===o?'selected':''}>${esc(o)}</option>`).join('')}</select>`;
  else if(q.type==='journal'||q.type==='drag')controls=journalControls(q);
  else controls=`${q.type==='guided'&&q.guided?`<div class="guided-steps">${q.steps.map((s,i)=>`<span class="step ${i===session.step?'active':i<session.step?'done':''}">${i<session.step?'✓':i+1}. ${s.label}</span>`).join('')}</div><div class="formula">${esc(q.steps[session.step].formula)}</div>`:''}<label class="answer-label" for="answer">${q.type==='guided'&&q.guided?q.steps[session.step].label:'Your answer'} · use a minus sign for a loss</label><input id="answer" class="number-input" type="text" inputmode="decimal" autocomplete="off" value="${esc(session.numeric||'')}" placeholder="Enter amount" aria-label="Your answer" ${session.locked?'disabled':''}>`;
- layout(`<div class="practice-wrap"><div class="session-top">${button('×','back','back',`aria-label="End session" ${session.id?`data-id="${session.id}"`:''}`)}${bar(session.baseIndex/session.total*100,t.color)}<small>${session.baseIndex} / ${session.total}${session.bonus?` + ${session.bonus} bonus`:''}</small></div><section class="quiz" style="--color:${t.color}"><div class="question-meta"><span class="eyebrow">${t.name} · ${session.mode==='rapid'?'RAPID FIRE':session.mode.toUpperCase()}</span><span class="tag ${session.bonusQuestion?'bonus':''}">${session.bonusQuestion?'↻ Targeted bonus':`LEVEL ${level(t.id)}`}</span></div>${session.mode==='rapid'?'<div class="timer"><span id="timebar" style="width:100%"></span></div><p id="seconds" class="muted" style="text-align:center">10 seconds</p>':''}<h2 class="${session.mode==='rapid'?'rapid-prompt':''}">${esc(q.prompt)}</h2>${formula(q)}${controls}<div id="feedback-area">${feedbackHtml()}</div><div class="actions">${button('♫ Verbal hint','hint','text-button',session.locked?'disabled':'')}${button('Review topic','review','text-button')}${session.locked?button('Continue →','next'):q.type!=='choice'?button(q.type==='guided'&&q.guided&&session.step<q.steps.length-1?'Check step →':'Check answer','submit'):''}</div>${session.mode!=='rapid'?`<p class="coach-line"><i></i> ${state.voice?'Spoken coach':'Text coach'} · a gentle hint after 10 seconds.</p>`:''}</section></div>`);bindDrag()}
+ layout(`<div class="practice-wrap"><div class="session-top">${button('×','back','back',`aria-label="End session" ${session.id?`data-id="${session.id}"`:''}`)}${bar(session.baseIndex/session.total*100,t.color)}<small>${session.baseIndex} / ${session.total}${session.bonus?` + ${session.bonus} bonus`:''}</small></div><section class="quiz" style="--color:${t.color}"><div class="question-meta"><span class="eyebrow">${t.name} · ${session.mode==='rapid'?'RAPID FIRE':session.mode.toUpperCase()}</span><span class="tag ${session.bonusQuestion?'bonus':''}">${session.bonusQuestion?'↻ Targeted bonus':`LEVEL ${level(t.id)}`}</span></div>${session.mode==='rapid'?'<div class="timer"><span id="timebar" style="width:100%"></span></div><p id="seconds" class="muted" style="text-align:center">10 seconds</p>':''}<h2 class="${session.mode==='rapid'?'rapid-prompt':''}">${esc(q.prompt)}</h2>${formula(q)}${controls}<div id="feedback-area">${feedbackHtml()}</div><div class="actions">${button('♫ Verbal hint','hint','text-button',session.locked?'disabled':'')}${button('Review topic','review','text-button')}${session.locked?button('Continue →','next'):q.type!=='choice'?button(q.type==='guided'&&q.guided&&session.step<q.steps.length-1?'Check step →':'Check answer','submit'):''}</div>${session.mode!=='rapid'?`<p class="coach-line"><i></i> ${state.voice?'OpenAI coach':'Text coach'} · up to 8 progressive hints, about every 10 seconds.</p>`:''}</section></div>`);bindDrag()}
 function feedbackHtml(){if(!session.feedback)return '';return `<div class="feedback ${session.success?'good':''}" role="status"><h3>${session.success?session.attempts?'You worked through it.':'Nice work.':session.locked?'Time’s up. Let’s learn it.':session.attempts?'Try that again.':'A small nudge'}</h3><p>${esc(session.feedback)}</p>${(session.attempts>=2||session.locked)&&session.current.visual?visual(session.current.visual,session.current):''}</div>`}
 function refreshFeedback(){const area=$('#feedback-area');if(area)area.innerHTML=feedbackHtml()}
-function hint(manual=true){if(!session||session.locked)return;session.assisted=true;session.hintCount++;const q=session.current;session.feedback=session.hintCount===1?q.hint:q.strong;refreshFeedback();if(manual&&!state.voice){state.voice=true;save();const v=$('.voice');v.textContent='♫ Voice on';v.classList.add('on');v.setAttribute('aria-pressed','true');v.setAttribute('aria-label','Turn voice off')}speak(session.feedback)}
+function localHint(q,level){if(level<=2)return q.hint;if(level<=5)return q.strong||q.hint;return q.why||q.strong||q.hint}
+async function hint(manual=true){
+  if(!session||session.locked||session.hintBusy||session.hintCount>=8)return;
+  session.assisted=true;session.hintCount=Math.min(8,session.hintCount+1);session.hintLastAt=performance.now();session.hintBusy=true;
+  const q=session.current,questionId=q.id,levelNow=session.hintCount;
+  if(manual&&!state.voice){state.voice=true;save();const v=$('.voice');if(v){v.textContent='♫ Voice on';v.classList.add('on');v.setAttribute('aria-pressed','true');v.setAttribute('aria-label','Turn voice off')}}
+  session.feedback='Ledger Coach is thinking… Hint '+levelNow+'/8';refreshFeedback();
+  if(hintAbort)hintAbort.abort();hintAbort=new AbortController();
+  let text='';
+  try{
+    const response=await fetch('/api/coach',{method:'POST',headers:{'Content-Type':'application/json'},signal:hintAbort.signal,body:JSON.stringify({
+      topic:topic(q.topic)?.name||q.topic,skill:q.label||q.skill,type:q.type,question:q.prompt,options:q.options||q.accountOptions||[],answer:q.answer,formula:q.formula||'',explanation:q.why||q.strong||'',attempts:session.attempts,level:levelNow
+    })});
+    if(!response.ok)throw new Error('coach '+response.status);
+    const data=await response.json();text=String(data.hint||'').trim();if(!text)throw new Error('empty hint');
+  }catch(err){if(err?.name==='AbortError')return;text=localHint(q,levelNow)}
+  finally{if(session&&session.current?.id===questionId)session.hintBusy=false}
+  if(!session||session.current?.id!==questionId||session.locked)return;
+  session.feedback=text;refreshFeedback();speak(text);
+}
 function enqueue(q){const key=q.id;if(session.reinforced.has(key))return;session.reinforced.add(key);const a=fresh(q.topic,level(q.topic),q.skill,q.prompt),b=fresh(q.topic,level(q.topic),q.skill,a.prompt);session.queue.unshift(a,b)}
 function record(q,ok){const s=stat(q.topic),sk=skillState(q.topic,q.skill);state.questions++;s.answered++;sk.answered++;session.attempted++;if(ok){state.correct++;s.correct++;sk.correct++;session.correct++;if(!session.bonusQuestion)session.coreCorrect++;state.streak++;state.best=Math.max(state.best,state.streak);if(!session.assisted){sk.clean++;if(sk.open&&sk.clean>=2){sk.open=false;state.mistakesMastered++;toast('Skill mastered: '+q.label)}}else sk.clean=0}else{state.streak=0;sk.clean=0;sk.misses++;sk.open=true;session.missed.set(q.topic+':'+q.skill,{topic:q.topic,skill:q.skill,label:q.label});enqueue(q)}const m=mastery(q.topic);if(m>=85&&!s.mastered){s.mastered=true;celebrate();toast('Topic Mastered: '+topic(q.topic).name)}save()}
 function check(answer){if(!session||session.locked)return;const q=session.current;stopSpeech();if(q.type==='guided'&&q.guided){const good=Number(answer)===q.steps[session.step].answer&&Number.isFinite(Number(answer));if(good&&session.step<q.steps.length-1){session.step++;session.numeric='';session.feedback='Step complete. Carry that value into the next equation.';render();speak('Correct step. '+q.steps[session.step].label);return}if(!good){miss();return}}
